@@ -1,0 +1,46 @@
+# Development environment for the QAR decoder.
+#
+#   conda env create -f environment.yml
+#   conda activate qar-decode
+#
+# Python is pinned to 3.12 to match services/decoder-job/Dockerfile. The
+# decoder is the artefact that has to behave identically on a laptop and in
+# Fargate, so the interpreter is not a place to let the two drift.
+#
+# The runtime split is deliberate and worth preserving:
+#
+#   numpy    qar_decode core -- the only hard dependency
+#   pyarrow  Parquet output  -- the [arrow] extra
+#   boto3    the container's I/O layer, never imported by qar_decode
+#
+# tests/test_import_boundary.py fails the build if a cloud SDK reaches the
+# decoder, which is what keeps it runnable without an AWS account.
+
+name: qar-decode
+
+channels:
+  - conda-forge
+
+dependencies:
+  - python=3.12
+
+  # --- decoder core ---
+  - numpy>=1.26
+
+  # --- Parquet output (qar-decode[arrow]) ---
+  - pyarrow>=16.0
+
+  # --- decoder-job container I/O ---
+  - boto3>=1.34
+
+  # --- tests ---
+  - pytest>=8
+
+  # --- looking at decoded output ---
+  - pandas>=2.0
+
+  - pip
+  - pip:
+      # The decoder itself, editable, so `import qar_decode` picks up edits
+      # without reinstalling.
+      - -e ./packages/qar-decode
