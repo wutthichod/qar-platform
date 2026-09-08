@@ -22,6 +22,7 @@ import numpy as np
 import pyarrow as pa
 
 from qar_decode.decode import Decoded, timestamps
+from qar_decode.frames import FRAME_SECONDS
 
 __all__ = ["tables", "report_table"]
 
@@ -30,26 +31,35 @@ def _field(name: str, series, param_meta: dict[str, str]) -> pa.Field:
     return pa.field(name, pa.float64(), nullable=True, metadata=param_meta)
 
 
-def tables(decoded: Decoded, fap=None) -> dict[int, pa.Table]:
-    """One Arrow table per native sample rate."""
-    out: dict[int, pa.Table] = {}
+def rate_label(rate_hz: float) -> str:
+    """Filename-safe name for a rate. 0.25 Hz is a real rate: one sample per
+    four-second frame, which is what a great many FAP entries are."""
+    return f"{rate_hz:g}".replace(".", "p")
+
+
+def tables(decoded: Decoded, fap=None) -> dict[float, pa.Table]:
+    """One Arrow table per native sample rate, keyed by hertz."""
+    out: dict[float, pa.Table] = {}
     meta = decoded.report
 
-    for rate, names in decoded.by_rate().items():
+    for rate_hz, names in decoded.by_rate().items():
+        per_frame = int(round(rate_hz * FRAME_SECONDS))
         columns: list[pa.Array] = []
         fields: list[pa.Field] = []
 
-        offsets = decoded.timebase(rate)
+        offsets = decoded.timebase(rate_hz)
         fields.append(pa.field("t_offset_s", pa.float64(), nullable=False))
         columns.append(pa.array(offsets))
 
-        stamps = timestamps(decoded, rate)
+        stamps = timestamps(decoded, rate_hz)
         if stamps is not None:
             fields.append(pa.field("timestamp", pa.timestamp("ns", tz="UTC")))
             columns.append(pa.array(stamps))
 
         fields.append(pa.field("frame", pa.int32(), nullable=False))
-        columns.append(pa.array(np.repeat(np.arange(meta.n_frames, dtype=np.int32), rate)))
+        columns.append(
+            pa.array(np.repeat(np.arange(meta.n_frames, dtype=np.int32), per_frame))
+        )
 
         for name in names:
             s = decoded.series[name]
@@ -58,7 +68,8 @@ def tables(decoded: Decoded, fap=None) -> dict[int, pa.Table]:
                 "native_name": param.name if param else name,
                 "mnemonic": name,
                 "unit": s.unit or "",
-                "rate_hz": str(s.rate),
+                "rate_hz": f"{s.rate_hz:g}",
+                "samples_per_frame": str(s.samples_per_frame),
                 "bits": str(s.bits),
                 "signed": str(s.signed).lower(),
                 "fap": meta.fap,
@@ -82,7 +93,7 @@ def tables(decoded: Decoded, fap=None) -> dict[int, pa.Table]:
             columns.append(pa.array(s.values))
 
         schema = pa.schema(fields, metadata=_table_metadata(decoded))
-        out[rate] = pa.Table.from_arrays(columns, schema=schema)
+        out[rate_hz] = pa.Table.from_arrays(columns, schema=schema)
 
     return out
 
@@ -98,6 +109,8 @@ def _table_metadata(decoded: Decoded) -> dict[str, str]:
         "sync_offset": str(r.sync_offset),
         "sync_confidence": f"{r.sync_confidence:.6f}",
         "frames": str(r.n_frames),
+        "frame_seconds": f"{FRAME_SECONDS:g}",
+        "duration_s": f"{r.duration_s:g}",
         "frame_integrity": f"{r.frame_integrity:.6f}",
         "decoded_at": r.started_at or "",
     }

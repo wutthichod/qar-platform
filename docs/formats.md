@@ -4,7 +4,7 @@ What the POC sample set turned out to contain, and how each piece was
 established. Written down because none of it is documented publicly and all
 of it was determined from the bytes.
 
-Everything here is verified against the files in `decoder-poc/`. The
+Everything here is verified against the files in `qar-data/`. The
 regression tests in `packages/qar-decode/tests/test_samples.py` pin the
 findings; they skip when the samples are absent.
 
@@ -157,7 +157,44 @@ boundary is at word 6144. A sync search bounded by one subframe never
 reaches it and reports the file unreadable.
 
 Both samples: **sync confidence 1.000000, frame integrity 100%**, 1,243
-parameters decoded, rates 1/2/4/8/16/20/40 Hz.
+parameters decoded, rates 0.25/0.5/1/2/4/5/10 Hz.
+
+---
+
+## 3a. Timing: what a frame is worth
+
+ARINC 717 fixes this and the decoder depends on it everywhere:
+
+    a subframe is one second
+    a frame is four subframes, so a frame is four seconds
+
+It is worth stating because conflating a frame with a second is a silent
+fourfold error in every duration, sample rate and timestamp, and the result
+is still a well-formed file that no downstream tool objects to.
+
+The A350 sample settles it without appeal to the standard, because it
+records UTC:
+
+| Check | Result |
+|-------|--------|
+| UTC_SEC samples within one frame | 10, 11, 12, 13 — one per subframe, 1 s apart |
+| UTC advance per frame | 4.000 s, on all 5,504 transitions, no exceptions |
+| File duration by the recorded clock | 6.12 h |
+| Drift, decoded time axis vs that clock | 0 s over 22,020 rows |
+
+Two consequences worth knowing:
+
+**AGS `PRM_RATE` counts samples per frame, not hertz.** `PRM_RATE=4` is
+1 Hz; `PRM_RATE=32` on VRTG is 8 Hz, the standard vertical-acceleration
+rate. Read as hertz it overstates every rate in the FAP fourfold, and
+produces rates — 32 Hz altitude, 40 Hz on the B777 — that no recorder
+emits.
+
+**Corroboration from a third source.** With the correct divisor the B777
+yields 5 Hz and 10 Hz streams, which is exactly what
+`packages/qar-decode/tests/fixtures/THA935-1_decoded.csv` documents for a
+different aircraft decoded by the vendor's own tool: `_VRTG` 10 Hz,
+`_PITCH` 5 Hz, `_IVV` 1 Hz.
 
 ---
 

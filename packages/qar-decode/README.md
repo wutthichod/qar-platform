@@ -38,13 +38,15 @@ a decode. See `verify.py`.
 
 ```
 container/   strip the recorder's wrapper       -> word stream
-arinc717     bytes and bit fields               -> primitives
-frames       locate subframes, read counters    -> frame grid
+arinc717     locate subframes in that stream    -> size and offset
+frames       reshape into addressable time      -> frame grid
 fap/         read the Safran AGS FAP            -> parameters
 parameters   apply a FAP to a frame grid        -> engineering values
 segment      find flights inside a recording    -> segments
 decode       all of the above, with a report
 arrow        decoded values as Arrow tables     (extra: pyarrow)
+verify       read a decoded file back           (extra: pyarrow)
+selftest     offline end-to-end proof
 ```
 
 The boundaries are the point. Sync failing to lock is a different problem
@@ -70,10 +72,19 @@ FAP schema.
 ## Output shape
 
 One table per **native sample rate**, not one wide table at the maximum. A
-1 Hz parameter upsampled to sit beside a 32 Hz one costs 32x the storage and
+1 Hz parameter upsampled to sit beside an 8 Hz one costs 8x the storage and
 invents samples that were never recorded. Native names, units, bit widths,
 word positions, FAP name and decoder version travel as Arrow column
 metadata, so any value can be traced back to the bits it came from.
+
+## Timing
+
+A **subframe is one second and a frame is four**, per ARINC 717. The
+constants live in `frames.py` and everything scales off them. This is worth
+knowing before reading a rate: AGS `PRM_RATE` counts samples *per frame*, so
+`PRM_RATE=32` on VRTG is 8 Hz, not 32. `Series` exposes both
+`samples_per_frame` and `rate_hz`, and segments are indexed in seconds with
+`*_frame` properties for comparing against a vendor tool.
 
 ## Two things the decoder decides for itself
 
@@ -103,4 +114,4 @@ Or without conda: `pip install -e '.[dev]'`.
 Everything is synthesised except `tests/test_samples.py`, which regresses
 against the real POC files and skips when they are absent. Real flight data
 is operationally sensitive and is not in this repository; point
-`QAR_SAMPLES` at a `decoder-poc` checkout to run those.
+`QAR_SAMPLES` at a `qar-data` checkout to run those.

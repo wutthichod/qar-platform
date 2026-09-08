@@ -53,13 +53,13 @@ decoder, no logic in Dagster. Enforced by
 
 Infrastructure is built and validated. The decoder now decodes.
 
-The `decoder-poc/` sample set supplied the raw files and the Safran AGS FAPs
+The `qar-data/` sample set supplied the raw files and the Safran AGS FAPs
 that were previously missing. Against them:
 
 | Aircraft | Container | Result |
 |----------|-----------|--------|
-| A350 | ACMS `.pmf` | 1024-word subframes, sync confidence 1.000000, 100% frame integrity |
-| B777 | Teledyne `.wgl` | 512-word subframes, sync confidence 1.000000, 100% frame integrity, 1,243 parameters |
+| A350 | ACMS `.pmf` | 1024-word subframes, sync confidence 1.000000, 100% frame integrity, 6h07m |
+| B777 | Teledyne `.wgl` | 512-word subframes, sync confidence 1.000000, 100% frame integrity, 1,243 parameters, 12h16m |
 | B787 | Boeing EDS crate | unwrapped, signature-verified and demuxed; **parameters blocked** |
 
 Values are validated against physics rather than against a claim: vertical
@@ -68,6 +68,11 @@ runs 96 → 43,036 ft, heading stays within ±180°. The strongest single check
 is the A350 superframe, where word 586 read at the modulos the FAP gives
 spells the tail number and both airport codes in ASCII — independently
 matching the container manifest.
+
+Timing is anchored to the recording's own clock rather than assumed: a
+subframe is one second and a frame is four, confirmed by UTC advancing
+4.000 s across all 5,504 frame transitions of the A350 sample, with zero
+drift between the decoded time axis and that clock over 22,020 rows.
 
 `docs/formats.md` derives all three container formats and the FAP schema.
 
@@ -86,8 +91,8 @@ matching the container manifest.
 
 The open decision blocking FR-4 is Athena vs Trino. See docs/decisions/0002.
 The sample set answers the schema half of it: rates are genuinely mixed —
-1/4/16/32 Hz on the A350, 1/2/4/8/16/20/40 Hz on the B777 — so Silver stores
-one table per native rate rather than one wide table at the maximum.
+0.25/1/4/8 Hz on the A350, 0.25/0.5/1/2/4/5/10 Hz on the B777 — so Silver
+stores one table per native rate rather than one wide table at the maximum.
 
 ## Getting started
 

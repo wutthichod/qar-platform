@@ -51,27 +51,27 @@ def test_ground_discrete_gives_takeoff_and_touchdown() -> None:
     segs = segment(SegmentInputs(on_ground=~airborne, source="test"))
     assert len(segs) == 1
     s = segs[0]
-    assert s.takeoff_frame == 300
-    assert s.touchdown_frame == 300 + 3600 - 1
+    assert s.takeoff_second == 300
+    assert s.touchdown_second == 300 + 3600 - 1
     assert s.complete
-    assert s.first_frame == 0
-    assert s.last_frame == airborne.size - 1
+    assert s.first_second == 0
+    assert s.last_second == airborne.size - 1
 
 
-def test_touchdown_is_the_last_airborne_frame() -> None:
+def test_touchdown_is_the_last_airborne_second() -> None:
     """np.diff gives an exclusive stop. Off by one here is off by one second
     on every landing in the fleet."""
     airborne = _profile(taxi_out=100, airborne=1000, taxi_in=100)
     s = segment(SegmentInputs(on_ground=~airborne, source="test"))[0]
-    assert airborne[s.touchdown_frame]
-    assert not airborne[s.touchdown_frame + 1]
+    assert airborne[s.touchdown_second]
+    assert not airborne[s.touchdown_second + 1]
 
 
 def test_radio_altitude_path() -> None:
     airborne = _profile()
     radio = np.where(airborne, 5000.0, 0.0)
     s = segment(SegmentInputs(radio_altitude_ft=radio, source="test"))[0]
-    assert s.takeoff_frame == 300
+    assert s.takeoff_second == 300
     assert s.complete
 
 
@@ -79,7 +79,7 @@ def test_ground_speed_path() -> None:
     airborne = _profile()
     speed = np.where(airborne, 400.0, 10.0)
     s = segment(SegmentInputs(ground_speed_kt=speed, source="test"))[0]
-    assert s.takeoff_frame == 300
+    assert s.takeoff_second == 300
 
 
 def test_two_sectors_in_one_file() -> None:
@@ -89,8 +89,8 @@ def test_two_sectors_in_one_file() -> None:
     ]
     segs = segment(SegmentInputs(on_ground=~airborne, source="test"))
     assert [s.flight_id for s in segs] == ["F01", "F02"]
-    assert segs[0].takeoff_frame == 200
-    assert segs[1].takeoff_frame == 2900
+    assert segs[0].takeoff_second == 200
+    assert segs[1].takeoff_second == 2900
     assert all(s.complete for s in segs)
 
 
@@ -100,24 +100,24 @@ def test_a_file_that_is_airborne_throughout_is_one_open_segment() -> None:
     segs = segment(SegmentInputs(on_ground=np.zeros(4000, bool), source="test"))
     assert len(segs) == 1
     assert not segs[0].complete
-    assert segs[0].takeoff_frame is None
-    assert segs[0].touchdown_frame is None
+    assert segs[0].takeoff_second is None
+    assert segs[0].touchdown_second is None
 
 
 def test_a_recording_that_stops_in_the_air_has_no_touchdown() -> None:
     airborne = np.r_[np.zeros(300, bool), np.ones(3000, bool)]
     s = segment(SegmentInputs(on_ground=~airborne, source="test"))[0]
-    assert s.takeoff_frame == 300
-    assert s.touchdown_frame is None
+    assert s.takeoff_second == 300
+    assert s.touchdown_second is None
     assert not s.complete
 
 
-def test_frame_indices_stay_inside_the_recording() -> None:
+def test_second_indices_stay_inside_the_recording() -> None:
     airborne = _profile(taxi_out=100, airborne=1000, taxi_in=0)
     n = airborne.size
     for s in segment(SegmentInputs(on_ground=~airborne, source="test")):
-        assert 0 <= s.first_frame <= s.last_frame < n
-        assert s.touchdown_frame is None or s.touchdown_frame < n
+        assert 0 <= s.first_second <= s.last_second < n
+        assert s.touchdown_second is None or s.touchdown_second < n
 
 
 def test_no_usable_signal_is_an_error_not_a_guess() -> None:
@@ -126,6 +126,9 @@ def test_no_usable_signal_is_an_error_not_a_guess() -> None:
 
 
 def test_segment_reports_durations() -> None:
-    s = FlightSegment("F01", "HS-TST", 0, 4139, takeoff_frame=300, touchdown_frame=3899)
+    s = FlightSegment("F01", "HS-TST", 0, 4139, takeoff_second=300, touchdown_second=3899)
     assert s.duration_s == 4140
     assert s.airborne_s == 3599
+    # Vendor tools number frames, not seconds; a frame is four seconds.
+    assert s.takeoff_frame == 75
+    assert s.touchdown_frame == 974

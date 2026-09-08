@@ -35,8 +35,8 @@ def detect(data: bytes) -> str:
     )
 
 
-def unwrap(data: bytes, container: str | None = None) -> Recording:
-    kind = container or detect(data)
+def unwrap(data: bytes) -> Recording:
+    kind = detect(data)
     if kind == "pmf":
         return pmf.unwrap(data)
     if kind == "wgl":

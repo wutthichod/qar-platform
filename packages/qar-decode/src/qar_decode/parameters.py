@@ -13,6 +13,7 @@ from dataclasses import dataclass
 import numpy as np
 
 from qar_decode.fap.ags import AcquiredParameter, Conversion
+from qar_decode.frames import FRAME_SECONDS
 
 __all__ = ["Series", "decode"]
 
@@ -24,12 +25,17 @@ class Series:
     mnemonic: str
     values: np.ndarray        # float64, NaN where invalid
     valid: np.ndarray         # bool, same shape
-    rate: int                 # samples per second
+    samples_per_frame: int    # occurrences in one frame, i.e. in four seconds
     unit: str | None
     raw: np.ndarray           # counts, before conversion
     signed: bool
     bits: int
     labels: dict[int, str] | None = None
+
+    @property
+    def rate_hz(self) -> float:
+        """Samples per second. A frame is four seconds, not one."""
+        return self.samples_per_frame / FRAME_SECONDS
 
     @property
     def coverage(self) -> float:
@@ -152,13 +158,25 @@ def decode(fs, param: AcquiredParameter) -> Series:
     signed = _resolve_signed(param, raw_all, bits)
     counts = _twos(raw_all, bits) if signed else raw_all
 
-    # An all-ones field is the recorder's no-computed-data marker -- but
-    # only for an unsigned field. In two's complement all-ones is -1, a
-    # perfectly ordinary small value, and discarding it punches holes in
-    # exactly the quietest part of the flight: pitch and lateral
-    # acceleration sit near zero for hours of level cruise.
-    if not signed:
-        valid = valid & (raw_all != (1 << bits) - 1)
+    # An all-ones field is the recorder's no-computed-data marker, but that
+    # convention only holds for wide unsigned numeric words. Two cases where
+    # applying it destroys good data:
+    #
+    #   signed      all-ones is -1, an ordinary small value. Discarding it
+    #               punches holes in exactly the quietest part of the
+    #               flight, where pitch and lateral acceleration sit near
+    #               zero for hours of level cruise.
+    #
+    #   enumerated  a parameter whose FAP lists all-ones as a labelled state
+    #               means it. On a 1-bit discrete all-ones *is* 1, so the
+    #               rule silently deletes every "true" -- and a discrete
+    #               that is true for the whole flight vanishes entirely.
+    #
+    # Below eight bits the marker is not distinguishable from data at all,
+    # so it is not applied there either.
+    all_ones = (1 << bits) - 1
+    if not signed and bits >= 8 and all_ones not in param.discretes:
+        valid = valid & (raw_all != all_ones)
 
     values = _apply(param.conversions, counts) * param.slope + param.offset
     values = np.where(valid, values, np.nan)
@@ -167,7 +185,7 @@ def decode(fs, param: AcquiredParameter) -> Series:
         mnemonic=param.mnemonic,
         values=values,
         valid=valid,
-        rate=len(param.samples),
+        samples_per_frame=len(param.samples),
         unit=param.unit,
         raw=raw_all,
         signed=signed,

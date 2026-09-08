@@ -31,6 +31,8 @@ from dataclasses import dataclass
 
 import numpy as np
 
+from qar_decode.frames import FRAME_SECONDS
+
 __all__ = ["FlightSegment", "SegmentInputs", "segment", "segment_decoded"]
 
 # Mnemonics that carry air/ground, airspeed and altitude, per FAP family.
@@ -56,33 +58,55 @@ MIN_FLIGHT_S = 120
 
 @dataclass(frozen=True)
 class FlightSegment:
-    """One flight's extent within a recording. Frame indices are seconds."""
+    """One flight's extent within a recording, indexed in **seconds**.
+
+    Seconds, not frames. A frame is four seconds, so frame resolution puts a
+    four-second error bar on every rotation and touchdown -- and an index
+    labelled "frame" that is really a second is how that error gets into
+    somebody's takeoff-performance statistics.
+
+    The ``*_frame`` properties convert back for comparison against a vendor
+    tool, which numbers frames rather than seconds.
+    """
 
     flight_id: str
     tail_number: str | None
-    first_frame: int
-    last_frame: int
-    takeoff_frame: int | None = None
-    touchdown_frame: int | None = None
+    first_second: int
+    last_second: int
+    takeoff_second: int | None = None
+    touchdown_second: int | None = None
 
     @property
     def duration_s(self) -> int:
-        return self.last_frame - self.first_frame + 1
+        return self.last_second - self.first_second + 1
 
     @property
     def airborne_s(self) -> int | None:
-        if self.takeoff_frame is None or self.touchdown_frame is None:
+        if self.takeoff_second is None or self.touchdown_second is None:
             return None
-        return self.touchdown_frame - self.takeoff_frame
+        return self.touchdown_second - self.takeoff_second
 
     @property
     def complete(self) -> bool:
-        return self.takeoff_frame is not None and self.touchdown_frame is not None
+        return self.takeoff_second is not None and self.touchdown_second is not None
+
+    @property
+    def takeoff_frame(self) -> int | None:
+        """Vendor frame number, for cross-checking against an FDM tool."""
+        if self.takeoff_second is None:
+            return None
+        return int(self.takeoff_second // FRAME_SECONDS)
+
+    @property
+    def touchdown_frame(self) -> int | None:
+        if self.touchdown_second is None:
+            return None
+        return int(self.touchdown_second // FRAME_SECONDS)
 
 
 @dataclass
 class SegmentInputs:
-    """Per-frame signals, all at 1 Hz, all optional but not all at once."""
+    """Per-second signals, all at 1 Hz, all optional but not all at once."""
 
     on_ground: np.ndarray | None = None      # bool
     radio_altitude_ft: np.ndarray | None = None
@@ -92,19 +116,31 @@ class SegmentInputs:
     source: str = ""
 
 
-def _to_1hz(values: np.ndarray, rate: int, n_frames: int) -> np.ndarray:
-    """Collapse a parameter to one value per second.
+def _to_1hz(values: np.ndarray, samples_per_frame: int, n_frames: int) -> np.ndarray:
+    """Resample a parameter to exactly one value per second.
 
-    The maximum over the second, not the mean: for the signals used here --
-    airspeed crossing a threshold, a discrete going true -- a single sample
-    of evidence within the second is the thing worth keeping.
+    A frame is four seconds, so a parameter with four samples per frame is
+    already 1 Hz and one with thirty-two is 8 Hz. Anything slower than 1 Hz
+    -- and a great many FAP entries appear once per frame, which is 0.25 Hz
+    -- is held across the seconds it does not cover.
+
+    Faster than 1 Hz collapses by maximum, not mean: for the signals used
+    here, a threshold crossing or a discrete going true, one sample of
+    evidence within the second is the thing worth keeping.
     """
-    if rate <= 1:
-        return values[:n_frames]
-    usable = n_frames * rate
-    grid = values[:usable].reshape(n_frames, rate)
-    with np.errstate(invalid="ignore"):
-        return np.nanmax(grid, axis=1)
+    n_seconds = int(n_frames * FRAME_SECONDS)
+    per_second = samples_per_frame / FRAME_SECONDS
+
+    if per_second >= 1:
+        step = int(per_second)
+        usable = n_seconds * step
+        grid = values[:usable].reshape(n_seconds, step)
+        with np.errstate(invalid="ignore"):
+            return np.nanmax(grid, axis=1)
+
+    # Slower than 1 Hz: hold each sample over the seconds it spans.
+    span = int(round(1 / per_second))
+    return np.repeat(values[: n_frames * samples_per_frame], span)[:n_seconds]
 
 
 def _debounce(flags: np.ndarray, hold: int = DEBOUNCE_S) -> np.ndarray:
@@ -143,13 +179,13 @@ def inputs_from_decoded(decoded) -> SegmentInputs:
         s = series.get(name)
         if s is None or not s.valid.any():
             return None
-        return _to_1hz(s.values, s.rate, n)
+        return _to_1hz(s.values, s.samples_per_frame, n)
 
     for name in GROUND_DISCRETES:
         s = series.get(name)
         if s is None or not s.valid.any():
             continue
-        flags = _to_1hz(np.nan_to_num(s.values, nan=0.0), s.rate, n) > 0.5
+        flags = _to_1hz(np.nan_to_num(s.values, nan=0.0), s.samples_per_frame, n) > 0.5
         # A discrete that never changes carries no information: some FAPs
         # map a bit the recorder never populated, and a constant "on ground"
         # would swallow the whole flight.
@@ -220,17 +256,17 @@ def segment(
         # stopped mid-air, so the rotation or the touchdown is not in this
         # file. Reporting frame 0 as a takeoff would invent an event, and
         # every rotation statistic computed from it would be wrong.
-        takeoff_frame = None if takeoff == 0 else int(takeoff)
-        touchdown_frame = None if last_airborne >= n - 1 else last_airborne
+        takeoff_second = None if takeoff == 0 else int(takeoff)
+        touchdown_second = None if last_airborne >= n - 1 else last_airborne
 
         segments.append(
             FlightSegment(
                 flight_id=f"{flight_prefix}{i:02d}",
                 tail_number=tail_number,
-                first_frame=first,
-                last_frame=min(max(last, last_airborne), n - 1),
-                takeoff_frame=takeoff_frame,
-                touchdown_frame=touchdown_frame,
+                first_second=first,
+                last_second=min(max(last, last_airborne), n - 1),
+                takeoff_second=takeoff_second,
+                touchdown_second=touchdown_second,
             )
         )
 
@@ -241,10 +277,10 @@ def segment(
             FlightSegment(
                 flight_id=f"{flight_prefix}01",
                 tail_number=tail_number,
-                first_frame=0,
-                last_frame=n - 1,
-                takeoff_frame=None,
-                touchdown_frame=None,
+                first_second=0,
+                last_second=n - 1,
+                takeoff_second=None,
+                touchdown_second=None,
             )
         )
     return segments

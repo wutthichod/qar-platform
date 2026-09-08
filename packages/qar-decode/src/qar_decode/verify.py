@@ -7,7 +7,7 @@ module reads that back and checks the arithmetic still holds.
 The point is not to re-decode. It is to answer, months later and without the
 raw file, "what am I looking at and can I trust it" -- and to catch the two
 failures that silently produce a well-formed file: a row count that does not
-match `frames x rate`, and a column whose values have left the range its own
+match `frames x samples-per-frame`, and a column whose values have left the range its own
 FAP declared.
 """
 
@@ -15,7 +15,6 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
 
 import numpy as np
 import pyarrow.parquet as pq
@@ -29,7 +28,8 @@ _INDEX_COLUMNS = ("t_offset_s", "timestamp", "frame")
 class ColumnInfo:
     name: str
     unit: str | None
-    rate: int | None
+    rate_hz: float | None
+    samples_per_frame: int | None
     bits: int | None
     signed: bool | None
     native_name: str | None
@@ -61,9 +61,14 @@ class FileInfo:
     problems: list[str] = field(default_factory=list)
 
     @property
-    def rate(self) -> int | None:
-        rates = {c.rate for c in self.columns if c.rate}
+    def rate_hz(self) -> float | None:
+        rates = {c.rate_hz for c in self.columns if c.rate_hz}
         return rates.pop() if len(rates) == 1 else None
+
+    @property
+    def samples_per_frame(self) -> int | None:
+        counts = {c.samples_per_frame for c in self.columns if c.samples_per_frame}
+        return counts.pop() if len(counts) == 1 else None
 
     def summary(self) -> str:
         m = self.table_metadata
@@ -73,8 +78,8 @@ class FileInfo:
             f"written by        {self.created_by}",
             f"shape             {self.n_rows:,} rows x {self.n_columns} columns",
         ]
-        if self.rate:
-            lines.append(f"sample rate       {self.rate} Hz")
+        if self.rate_hz:
+            lines.append(f"sample rate       {self.rate_hz:g} Hz")
         for key, label in (
             ("tail_number", "aircraft"), ("flight_number", "flight"),
             ("origin", "from"), ("destination", "to"),
@@ -152,7 +157,10 @@ def inspect_file(path: str | Path) -> FileInfo:
         info.columns.append(ColumnInfo(
             name=field_.name,
             unit=cm.get("unit") or None,
-            rate=int(cm["rate_hz"]) if cm.get("rate_hz") else None,
+            rate_hz=float(cm["rate_hz"]) if cm.get("rate_hz") else None,
+            samples_per_frame=(
+                int(cm["samples_per_frame"]) if cm.get("samples_per_frame") else None
+            ),
             bits=int(cm["bits"]) if cm.get("bits") else None,
             signed=cm.get("signed") == "true" if "signed" in cm else None,
             native_name=cm.get("native_name"),
@@ -173,13 +181,16 @@ def inspect_file(path: str | Path) -> FileInfo:
 def _check(table, info: FileInfo, meta: dict[str, str]) -> list[str]:
     problems: list[str] = []
 
-    # Row count must equal frames x rate. A mismatch means samples were
+    # Row count must equal frames x samples-per-frame. A frame is four
+    # seconds, so counting rows as frames x hertz is short by four. A
+    # mismatch means samples were
     # dropped or duplicated, and every timestamp after the fault is wrong.
-    rate, frames = info.rate, meta.get("frames")
-    if rate and frames and table.num_rows != int(frames) * rate:
+    per_frame, frames = info.samples_per_frame, meta.get("frames")
+    rate = info.rate_hz
+    if per_frame and frames and table.num_rows != int(frames) * per_frame:
         problems.append(
-            f"row count {table.num_rows} != frames({frames}) x rate({rate}) "
-            f"= {int(frames) * rate}"
+            f"row count {table.num_rows} != frames({frames}) x "
+            f"samples_per_frame({per_frame}) = {int(frames) * per_frame}"
         )
 
     # The time base must be exactly 1/rate, evenly spaced from zero.
@@ -187,15 +198,15 @@ def _check(table, info: FileInfo, meta: dict[str, str]) -> list[str]:
         t = table.column("t_offset_s").to_numpy()
         steps = np.diff(t)
         if not np.allclose(steps, 1.0 / rate):
-            problems.append(f"t_offset_s is not evenly spaced at 1/{rate}s")
+            problems.append(f"t_offset_s is not evenly spaced at 1/{rate:g}s")
         if t[0] != 0.0:
             problems.append(f"t_offset_s starts at {t[0]}, not 0")
 
     for c in info.columns:
         if c.name in _INDEX_COLUMNS:
             continue
-        if c.rate and rate and c.rate != rate:
-            problems.append(f"{c.name}: rate {c.rate} Hz in a {rate} Hz table")
+        if c.rate_hz and rate and c.rate_hz != rate:
+            problems.append(f"{c.name}: rate {c.rate_hz:g} Hz in a {rate:g} Hz table")
         if c.n_valid == 0:
             problems.append(f"{c.name}: no valid samples")
             continue

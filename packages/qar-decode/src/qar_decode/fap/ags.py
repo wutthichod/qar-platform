@@ -30,6 +30,8 @@ import xml.etree.ElementTree as ET
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from qar_decode.frames import FRAME_SECONDS
+
 __all__ = [
     "AcquiredParameter",
     "BitPart",
@@ -218,10 +220,6 @@ class Conversion:
             hi=_float(el, "EUC_MAX", 1e30),
         )
 
-    @property
-    def is_identity(self) -> bool:
-        return self.coefficients in ((0.0, 1.0), (1.0,))
-
 
 # ---------------------------------------------------------------------------
 # The parameter
@@ -252,9 +250,22 @@ class AcquiredParameter:
         return max((s.bits for s in self.samples), default=0)
 
     @property
-    def rate(self) -> int:
-        """Samples per second, derived from the locations themselves."""
+    def samples_per_frame(self) -> int:
+        """How many times the parameter appears in one frame.
+
+        This is what AGS's PRM_RATE counts -- it agrees with this number on
+        every non-superframe parameter checked -- and it is *not* a rate in
+        hertz. A frame is four seconds, so PRM_RATE=4 means one sample per
+        second, and PRM_RATE=32 on VRTG means 8 Hz, which is the standard
+        vertical-acceleration rate. Reading PRM_RATE as hertz overstates
+        every rate in the FAP by four.
+        """
         return len(self.samples)
+
+    @property
+    def rate_hz(self) -> float:
+        """Samples per second."""
+        return self.samples_per_frame / FRAME_SECONDS
 
     @property
     def is_discrete(self) -> bool:
@@ -375,8 +386,8 @@ class Fap:
         """
         out = []
         for p in self.parameters.values():
-            if p.stated_rate and p.stated_rate != p.rate:
-                out.append((p.mnemonic, p.stated_rate, p.rate))
+            if p.stated_rate and p.stated_rate != p.samples_per_frame:
+                out.append((p.mnemonic, p.stated_rate, p.samples_per_frame))
         return out
 
 

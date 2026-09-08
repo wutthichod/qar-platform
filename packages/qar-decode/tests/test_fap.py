@@ -24,9 +24,18 @@ def test_documents_are_utf8_despite_declaring_utf16(fap_dir) -> None:
 
 def test_rate_comes_from_locations_not_the_stated_field(fap_dir) -> None:
     fap = load_fap(fap_dir)
-    assert fap["ALT"].rate == 4          # ALL subframes x 1 sample
-    assert fap["VRT"].rate == 8          # ALL subframes x 2 samples
+    assert fap["ALT"].samples_per_frame == 4     # ALL subframes x 1 sample
+    assert fap["VRT"].samples_per_frame == 8     # ALL subframes x 2 samples
     assert fap.rate_disagreements() == []
+
+
+def test_prm_rate_is_samples_per_frame_not_hertz(fap_dir) -> None:
+    """A frame is four seconds. PRM_RATE=4 is 1 Hz, not 4 Hz -- reading it
+    as hertz overstates every rate in the FAP fourfold."""
+    fap = load_fap(fap_dir)
+    assert fap["ALT"].samples_per_frame == 4
+    assert fap["ALT"].rate_hz == 1.0
+    assert fap["VRT"].rate_hz == 2.0
 
 
 def test_conversion_is_mantissa_times_power_of_ten(fap_dir) -> None:
@@ -41,7 +50,7 @@ def test_parts_in_different_subframes_stay_one_sample(fap_dir) -> None:
     Reading that as two parameters is the failure this guards: both halves
     decode to plausible numbers, so nothing downstream notices."""
     param = load_fap(fap_dir)["SPLIT"]
-    assert param.rate == 1
+    assert param.samples_per_frame == 1
     assert len(param.samples) == 1
     assert [p.subframe for p in param.samples[0].parts] == [1, 2]
     assert param.bits == 12

@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -25,6 +25,7 @@ from qar_decode import frames as frames_mod
 from qar_decode import parameters as params_mod
 from qar_decode.container import Recording, unwrap
 from qar_decode.fap import Fap, load_fap
+from qar_decode.frames import FRAME_SECONDS
 from qar_decode.parameters import Series
 
 __all__ = [
@@ -32,7 +33,15 @@ __all__ = [
     "decode_bytes", "decode_file",
 ]
 
-DECODER_VERSION = "1.0.0"
+# Bump on any change that alters decoded output, not only on releases: a
+# stamped version is the only way to scope a re-decode, and two files
+# claiming 1.0.0 that disagree cannot be told apart after the fact.
+#   1.1.0  all-ones no-computed-data no longer applied to signed fields,
+#          enumerated states, or fields narrower than 8 bits
+# 2.0.0: a frame is four seconds, not one. Every duration, sample rate and
+# timestamp before this version is wrong by a factor of four, so anything
+# stamped 1.x must be re-decoded rather than compared against 2.x output.
+DECODER_VERSION = "2.0.0"
 
 # Mnemonics that carry recorded UTC, in the order the fields combine.
 _UTC = ("YEAR", "MONTH", "DAY", "UTC_HOUR", "UTC_MIN", "UTC_SEC")
@@ -72,7 +81,7 @@ class SuspectFinding:
 
     mnemonic: str
     unit: str | None
-    rate: int
+    rate_hz: float
     jump_fraction: float
     declared_span: float
 
@@ -88,7 +97,7 @@ class DecodeReport:
     sync_offset: int
     sync_confidence: float
     n_frames: int
-    duration_s: int
+    duration_s: float
     frame_integrity: float
     decoded: list[str] = field(default_factory=list)
     failed: dict[str, str] = field(default_factory=dict)
@@ -106,8 +115,9 @@ class DecodeReport:
             f"decoder           {self.decoder_version}",
             f"subframe          {self.subframe_words} words, sync at word {self.sync_offset}",
             f"sync confidence   {self.sync_confidence:.6f}",
-            f"frames            {self.n_frames}  ({self.duration_s // 3600}h "
-            f"{self.duration_s % 3600 // 60}m {self.duration_s % 60}s)",
+            f"frames            {self.n_frames} x {FRAME_SECONDS:g}s  "
+            f"({int(self.duration_s) // 3600}h "
+            f"{int(self.duration_s) % 3600 // 60}m {int(self.duration_s) % 60}s)",
             f"frame integrity   {self.frame_integrity * 100:.4f}%",
             f"parameters        {len(self.decoded)} decoded, {len(self.failed)} failed",
         ]
@@ -127,7 +137,7 @@ class DecodeReport:
             for f in self.suspect[:10]:
                 lines.append(
                     f"  {f.mnemonic:<20} {f.jump_fraction * 100:5.1f}% of consecutive "
-                    f"samples jump >25% of range at {f.rate} Hz"
+                    f"samples jump >25% of range at {f.rate_hz:g} Hz"
                 )
         for note in self.notes:
             lines.append(f"note              {note}")
@@ -142,23 +152,28 @@ class Decoded:
     frames: frames_mod.FrameSet
     start_time: datetime | None = None
 
-    def by_rate(self) -> dict[int, list[str]]:
-        """Group parameters by native rate.
+    def by_rate(self) -> dict[float, list[str]]:
+        """Group parameters by native rate in hertz.
 
         Silver stores one table per rate rather than one wide table at the
-        maximum. Upsampling a 1 Hz parameter to sit beside a 32 Hz one
-        multiplies its storage by 32 and adds no information.
+        maximum. Upsampling a 1 Hz parameter to sit beside an 8 Hz one
+        multiplies its storage eightfold and adds no information.
         """
-        out: dict[int, list[str]] = {}
+        out: dict[float, list[str]] = {}
         for name, s in sorted(self.series.items()):
-            if s.rate:
-                out.setdefault(s.rate, []).append(name)
+            if s.samples_per_frame:
+                out.setdefault(s.rate_hz, []).append(name)
         return dict(sorted(out.items()))
 
-    def timebase(self, rate: int) -> np.ndarray:
-        """Seconds from the start of the recording, for one rate."""
-        n = self.report.n_frames * rate
-        return np.arange(n, dtype=np.float64) / rate
+    def timebase(self, rate_hz: float) -> np.ndarray:
+        """Seconds from the start of the recording, for one rate.
+
+        The sample count comes from frames, not seconds: a frame holds
+        ``rate_hz * FRAME_SECONDS`` samples of a parameter at this rate.
+        """
+        per_frame = int(round(rate_hz * FRAME_SECONDS))
+        n = self.report.n_frames * per_frame
+        return np.arange(n, dtype=np.float64) / rate_hz
 
 
 def _resolve_start_time(series: dict[str, Series], meta: dict[str, Any]) -> datetime | None:
@@ -221,7 +236,7 @@ def _suspect_check(name: str, s: Series, param) -> SuspectFinding | None:
     if param.min_op is None or param.max_op is None or param.is_discrete:
         return None
     span = param.max_op - param.min_op
-    if span <= 0 or s.rate < 2:
+    if span <= 0 or s.samples_per_frame < 2:
         return None
     good = np.isfinite(s.values)
     if good.sum() < 100:
@@ -235,7 +250,7 @@ def _suspect_check(name: str, s: Series, param) -> SuspectFinding | None:
     if fraction < 0.05:
         return None
     return SuspectFinding(
-        mnemonic=name, unit=s.unit, rate=s.rate,
+        mnemonic=name, unit=s.unit, rate_hz=s.rate_hz,
         jump_fraction=fraction, declared_span=span,
     )
 
@@ -266,7 +281,7 @@ def decode_bytes(
         except Exception as exc:                      # noqa: BLE001
             failed[name] = f"{type(exc).__name__}: {exc}"
             continue
-        if s.rate == 0:
+        if s.samples_per_frame == 0:
             failed[name] = "no usable locations"
             continue
         series[name] = s
@@ -297,7 +312,7 @@ def decode_bytes(
         sync_offset=fs.sync.offset,
         sync_confidence=fs.sync.confidence,
         n_frames=fs.n_frames,
-        duration_s=fs.n_frames,
+        duration_s=fs.duration_s,
         frame_integrity=fs.integrity,
         decoded=sorted(series),
         failed=failed,
@@ -325,10 +340,10 @@ def decode_file(
     return decode_bytes(path.read_bytes(), fap, source=str(path), only=only)
 
 
-def timestamps(decoded: Decoded, rate: int) -> np.ndarray | None:
+def timestamps(decoded: Decoded, rate_hz: float) -> np.ndarray | None:
     """Absolute UTC per sample for one rate, when a start time is known."""
     if decoded.start_time is None:
         return None
     base = np.datetime64(decoded.start_time.replace(tzinfo=None), "ns")
-    offsets = (decoded.timebase(rate) * 1e9).astype("timedelta64[ns]")
+    offsets = (decoded.timebase(rate_hz) * 1e9).astype("timedelta64[ns]")
     return base + offsets

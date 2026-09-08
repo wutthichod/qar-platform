@@ -7,27 +7,20 @@ container without change. tests/test_import_boundary.py enforces that.
 The pipeline, and where each stage lives:
 
     container/   strip the recorder's wrapper      -> word stream
-    arinc717     bytes and bit fields              -> primitives
-    frames       locate subframes                  -> frame grid
-    fap/         read the frame layout document    -> parameters
+    arinc717     locate subframes in that stream   -> size and offset
+    frames       reshape into addressable time     -> frame grid
+    fap/         read the Safran AGS FAP           -> parameters
     parameters   apply a FAP to a frame grid       -> engineering values
     segment      find flights inside a recording   -> segments
     decode       all of the above, with a report
     arrow        decoded values as Arrow tables    (needs pyarrow)
+    verify       read a decoded file back          (needs pyarrow)
+    selftest     offline end-to-end proof
+
+Only what callers outside the package actually use is re-exported here.
 """
 
-from qar_decode.arinc717 import (
-    SYNC_WORDS,
-    Parameter,
-    SyncResult,
-    WordPart,
-    build_frames,
-    decode_parameter,
-    find_sync,
-    superframe_counter,
-    unpack_packed,
-    unpack_padded,
-)
+from qar_decode.arinc717 import SYNC_WORDS, SyncResult, find_sync
 from qar_decode.decode import (
     DECODER_VERSION,
     Decoded,
@@ -46,17 +39,10 @@ __all__ = [
     "DecodeReport",
     "Fap",
     "FrameSet",
-    "Parameter",
     "Series",
     "SyncResult",
-    "WordPart",
-    "build_frames",
     "decode_bytes",
     "decode_file",
-    "decode_parameter",
     "find_sync",
     "load_fap",
-    "superframe_counter",
-    "unpack_packed",
-    "unpack_padded",
 ]

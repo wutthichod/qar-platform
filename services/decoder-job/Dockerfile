@@ -52,11 +52,13 @@ USER 10001
 # definition should set readonlyRootFilesystem with a tmpfs mount here.
 VOLUME ["/tmp"]
 
-# Fails fast and offline: proves the decoder imports and its round-trip
-# self-test passes, without touching S3. Useful as an ECS container health
-# check and as the first thing CI runs against a freshly built image.
+# Fails fast and offline: synthesises a recording and puts it through the
+# real pipeline -- container, sync, framing, parameters -- without touching
+# S3. Exercising the live modules is the point: a health check that tests a
+# reference implementation nothing calls lets a broken image report itself
+# healthy.
 HEALTHCHECK --interval=30s --timeout=10s --retries=2 \
-    CMD ["python", "-c", "from qar_decode.arinc717 import _self_test; raise SystemExit(_self_test())"]
+    CMD ["python", "-m", "qar_decode.selftest"]
 
 # No arguments: the container reads SOURCE_BUCKET and SOURCE_KEY from the
 # environment, which ECS injects via containerOverrides.

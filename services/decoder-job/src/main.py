@@ -208,8 +208,9 @@ def main() -> int:
             segments, signal = [], f"unavailable: {exc}"
         print(f"\nsegmentation ({signal}): {len(segments)} segment(s)", flush=True)
         for seg in segments:
-            print(f"  {seg.flight_id} frames {seg.first_frame}-{seg.last_frame} "
-                  f"takeoff={seg.takeoff_frame} touchdown={seg.touchdown_frame}", flush=True)
+            print(f"  {seg.flight_id} seconds {seg.first_second}-{seg.last_second} "
+                  f"takeoff={seg.takeoff_second}s touchdown={seg.touchdown_second}s "
+                  f"airborne={seg.airborne_s}s", flush=True)
 
         # 4. Write Silver, one object per native rate.
         written: list[str] = []
@@ -220,10 +221,12 @@ def main() -> int:
 
             tail = report.container_metadata.get("tail_number", "unknown")
             prefix = os.environ.get("LAKEHOUSE_PREFIX", "silver")
-            for rate, table in tables(decoded, fap).items():
+            from qar_decode.arrow import rate_label
+
+            for rate_hz, table in tables(decoded, fap).items():
                 buffer = io.BytesIO()
                 pq.write_table(table, buffer, compression="zstd")
-                name = f"rate_{rate:02d}hz.parquet"
+                name = f"rate_{rate_label(rate_hz)}hz.parquet"
                 if lakehouse:
                     key = f"{prefix}/tail={tail}/run={run_id}/{name}"
                     written.append(_put(lakehouse, key, buffer.getvalue(),

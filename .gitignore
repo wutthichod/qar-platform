@@ -14,3 +14,15 @@ terraform.tfvars
 tfplan
 
 .DS_Store
+
+# Decoded flight data. Never committed: these are real recorded flights,
+# subject to the operator's data policy, and a decode of one sector is
+# hundreds of megabytes. Regenerate with tools/local/decode_sample.sh
+# rather than storing them.
+#
+# Catalogs derived from a FAP -- parameter names, units, bit positions --
+# carry no flight data and are fine to commit; they live in
+# qar-data/catalog/.
+.local-out/
+*.parquet
+silver/

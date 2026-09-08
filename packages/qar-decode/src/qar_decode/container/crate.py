@@ -74,12 +74,6 @@ class CplStream:
         return len(self.records_by_type.get(3, ()))
 
 
-def looks_like_crate(data: bytes) -> bool:
-    if data[:2] == b"PK":
-        return True
-    return data[:2] == RECORD_SYNC
-
-
 def open_crate(data: bytes) -> tuple[bytes, dict[str, Any]]:
     """Return (payload, metadata) for a zipped EDS crate."""
     meta: dict[str, Any] = {}

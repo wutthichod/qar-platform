@@ -2,7 +2,7 @@
 
 Skipped unless the POC samples are present -- they are operationally
 sensitive and are not in the repository. Point QAR_SAMPLES at a checkout of
-`decoder-poc` to run them.
+`qar-data` to run them.
 
 These numbers were established by decoding the files and checking the result
 against physics and against the recorders' own metadata: vertical
@@ -24,7 +24,7 @@ from qar_decode.decode import decode_file
 from qar_decode.fap import load_fap
 from qar_decode.segment import inputs_from_decoded, segment_decoded
 
-POC = Path(os.environ.get("QAR_SAMPLES", Path(__file__).resolve().parents[4] / "decoder-poc"))
+POC = Path(os.environ.get("QAR_SAMPLES", Path(__file__).resolve().parents[4] / "qar-data"))
 SAMPLES = POC / "QAR Samples"
 FAPS = POC / "Fap"
 
@@ -104,10 +104,45 @@ def test_a350_recorded_utc_beats_the_offload_timestamp(a350) -> None:
 
 
 def test_a350_native_rates(a350) -> None:
+    """Rates in hertz, which means dividing samples-per-frame by four.
+
+    VRTG at 8 Hz and altitude at 1 Hz are the standard QAR rates. The same
+    parameters read as 32 Hz and 4 Hz -- what you get by treating a frame as
+    a second -- are rates no recorder produces.
+    """
     rates = a350.by_rate()
-    assert rates[4][:1] == ["ALT_STD"]
-    assert "VRTG" in rates[32]
-    assert "N1_1" in rates[16]
+    assert "ALT_STD" in rates[1.0]
+    assert "VRTG" in rates[8.0]
+    assert "N1_1" in rates[4.0]
+    assert a350.series["VRTG"].samples_per_frame == 32
+    assert a350.series["ALT_STD"].samples_per_frame == 4
+
+
+def test_a350_frame_is_four_seconds_by_the_recorded_clock(a350) -> None:
+    """The timing model, checked against the aircraft's own UTC.
+
+    Every downstream timestamp, sample rate and duration scales with this.
+    Getting it wrong is a silent fourfold error that still produces a
+    well-formed file, so it is pinned to the one source that cannot be
+    argued with: the clock in the recording.
+    """
+    n = a350.report.n_frames
+    sec = a350.series["UTC_SEC"].values.reshape(n, -1)
+
+    # Four UTC_SEC samples inside one frame, one second apart.
+    assert a350.series["UTC_SEC"].samples_per_frame == 4
+    np.testing.assert_array_equal(np.diff(sec[0]) % 60, [1, 1, 1])
+
+    # And the clock advances four seconds from one frame to the next.
+    hh = a350.series["UTC_HOUR"].values.reshape(n, -1)[:, 0]
+    mm = a350.series["UTC_MIN"].values.reshape(n, -1)[:, 0]
+    t = hh * 3600 + mm * 60 + sec[:, 0]
+    step = np.diff(t)
+    step = step[np.isfinite(step) & (np.abs(step) < 100)]
+    assert (step == 4.0).all()
+
+    assert a350.report.duration_s == n * 4
+    assert abs(a350.report.duration_s - (np.nanmax(t) - np.nanmin(t))) <= 4
 
 
 def test_a350_segments_into_one_complete_flight(a350) -> None:
@@ -116,8 +151,11 @@ def test_a350_segments_into_one_complete_flight(a350) -> None:
     s = segs[0]
     assert s.complete
     assert s.tail_number == "HS-THJ"
-    assert 3000 < s.airborne_s < 5000
-    assert 0 <= s.first_frame <= s.takeoff_frame < s.touchdown_frame <= s.last_frame
+    # VTBS -> OPKC, Bangkok to Karachi: between four and six hours airborne.
+    assert 4 * 3600 < s.airborne_s < 6 * 3600
+    assert (
+        0 <= s.first_second <= s.takeoff_second < s.touchdown_second <= s.last_second
+    )
 
 
 def test_a350_superframe_spells_the_tail_number() -> None:
@@ -151,9 +189,11 @@ def test_b777_decodes_and_segments() -> None:
     assert r.n_frames == 11044
 
     assert inputs_from_decoded(decoded).source == "derived:radio-altitude"
+    assert r.duration_s == 11044 * 4          # a frame is four seconds
     seg = segment_decoded(decoded)[0]
     assert seg.complete
-    assert 10000 < seg.airborne_s < 11000
+    # A 777-300ER long sector: getting on for twelve hours in the air.
+    assert 11 * 3600 < seg.airborne_s < 13 * 3600
 
 
 def test_b777_leading_fill_does_not_defeat_sync() -> None:

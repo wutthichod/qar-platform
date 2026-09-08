@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Decode a POC sample with no AWS account and no credentials.
+# Decode a sample flight with no AWS account and no credentials.
 #
 # Runs the same entrypoint the Fargate task runs, with LOCAL_SOURCE /
 # LOCAL_FAP / LOCAL_OUT standing in for the three S3 paths. If this fails,
@@ -8,35 +8,35 @@
 #   tools/local/decode_sample.sh a350
 #   tools/local/decode_sample.sh b777
 #   tools/local/decode_sample.sh b787          # container inspection only
-#   POC=/path/to/decoder-poc tools/local/decode_sample.sh b777
+#   QAR_DATA=/path/to/qar-data tools/local/decode_sample.sh b777
 #
 # Set DOCKER=1 to run the built image instead of the local interpreter.
 
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-POC="${POC:-$(cd "$ROOT/.." && pwd)/decoder-poc}"
+QAR_DATA="${QAR_DATA:-$(cd "$ROOT/.." && pwd)/qar-data}"
 OUT="${OUT:-$ROOT/.local-out}"
 TYPE="${1:-b777}"
 
-if [[ ! -d "$POC" ]]; then
-  echo "sample set not found at $POC; set POC=/path/to/decoder-poc" >&2
+if [[ ! -d "$QAR_DATA" ]]; then
+  echo "sample set not found at $QAR_DATA; set QAR_DATA=/path/to/qar-data" >&2
   exit 2
 fi
 
 case "$TYPE" in
   a350)
-    SOURCE="$(find "$POC/QAR Samples/A350" -name '*.pmf' | sort | head -1)"
-    FAP="$POC/Fap/CS350THA22"
+    SOURCE="$(find "$QAR_DATA/QAR Samples/A350" -name '*.pmf' | sort | head -1)"
+    FAP="$QAR_DATA/Fap/CS350THA22"
     PARAMS="ALT_STD,VRTG,N1_1,N1_2,HEADING,GS,RALT1,PITCH_ANG_CAP,LATG,GW,UTC_HOUR,UTC_MIN,UTC_SEC,YEAR,MONTH,DAY"
     ;;
   b777)
-    SOURCE="$(find "$POC/QAR Samples/B777" -name 'raw.dat' | sort | head -1)"
-    FAP="$POC/Fap/CS77724"
+    SOURCE="$(find "$QAR_DATA/QAR Samples/B777" -name 'raw.dat' | sort | head -1)"
+    FAP="$QAR_DATA/Fap/CS77724"
     PARAMS="aALTSTD1,aCAS1,aRALTC,aAIRGND1,VRTG,aGS2,aTAS1"
     ;;
   b787)
-    SOURCE="$(find "$POC/QAR Samples/B787" -name '*.zip' | sort | head -1)"
+    SOURCE="$(find "$QAR_DATA/QAR Samples/B787" -name '*.zip' | sort | head -1)"
     echo "==> B787 EDS crate: container inspection only"
     PYTHONPATH="$ROOT/packages/qar-decode/src" python3 - "$SOURCE" <<'PY'
 import sys
@@ -62,7 +62,7 @@ PY
 esac
 
 if [[ -z "${SOURCE:-}" || ! -f "$SOURCE" ]]; then
-  echo "no $TYPE sample under $POC" >&2
+  echo "no $TYPE sample under $QAR_DATA" >&2
   exit 2
 fi
 

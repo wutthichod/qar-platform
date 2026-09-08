@@ -11,7 +11,7 @@ the flight boundaries that segmentation must reproduce.
 
 This is the regression fixture for the vendor's own output. The matching
 raw file is still not available; `tests/test_samples.py` regresses against
-the `decoder-poc` sample set instead, which is a different set of flights.
+the `qar-data` sample set instead, which is a different set of flights.
 Once the matching raw file arrives, decoding it must reproduce this CSV
 column for column. The strongest check
 is `_VRTG` at 22:49:55 -- ten samples spanning 0.79 to 1.25 G, the landing

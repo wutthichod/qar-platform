@@ -57,14 +57,15 @@ docker run --rm \
 One Parquet object per **native sample rate**, not one wide table:
 
 ```
-silver/tail=HS-TTA/run=<RUN_ID>/rate_01hz.parquet
-silver/tail=HS-TTA/run=<RUN_ID>/rate_04hz.parquet
+silver/tail=HS-TTA/run=<RUN_ID>/rate_0p25hz.parquet
+silver/tail=HS-TTA/run=<RUN_ID>/rate_1hz.parquet
 ...
 silver/_reports/run=<RUN_ID>/report.parquet
 ```
 
-Upsampling a 1 Hz parameter to sit beside a 32 Hz one multiplies its storage
-by 32 and invents samples that were never recorded. Native names, units, bit
+Upsampling a 1 Hz parameter to sit beside an 8 Hz one multiplies its storage
+eightfold and invents samples that were never recorded. Rates are in hertz;
+0.25 Hz is real and common — one sample per four-second frame. Native names, units, bit
 widths, word positions, FAP name and decoder version travel as Arrow column
 metadata, so any value can be traced back to the bits it came from.
 
@@ -75,8 +76,8 @@ decode — every parameter in the document — writing Parquet for each rate.
 
 | Sample | On disk | Unwrapped | Parameters | Peak RSS | Wall | Task |
 |--------|---------|-----------|-----------|----------|------|------|
-| B777 `raw.dat`, 3h04m | 45 MB | 45 MB | 1,243 | 1.02 GB | 1.1 s | 1 vCPU / 2 GB |
-| A350 `.pmf`, 2h35m | 16 MB | 45 MB | 2,650 | 1.78 GB | 1.8 s | 1 vCPU / 4 GB |
+| B777 `raw.dat`, 12h16m | 45 MB | 45 MB | 1,243 | 1.02 GB | 1.1 s | 1 vCPU / 2 GB |
+| A350 `.pmf`, 10h18m | 16 MB | 45 MB | 2,650 | 1.78 GB | 1.8 s | 1 vCPU / 4 GB |
 
 Memory is dominated by holding every decoded series as float64 at its native
 rate, so it scales with `parameters x rate x duration` and not much with
@@ -100,12 +101,11 @@ writable mount at `/tmp`.
 
 ## Health check
 
-`HEALTHCHECK` runs the decoder's round-trip self-test: it synthesises a
-recording, decodes it and asserts the values come back. It touches no
-network and needs no credentials, so it is also the right first thing for CI
-to run against a freshly built image:
+`HEALTHCHECK` synthesises a recording and puts it through the real pipeline
+— container, sync, framing, parameters — asserting the values come back. It
+touches no network and needs no credentials, so it is also the right first
+thing for CI to run against a freshly built image:
 
 ```sh
-docker run --rm --entrypoint python qar-decoder:dev \
-  -c "from qar_decode.arinc717 import _self_test; raise SystemExit(_self_test())"
+docker run --rm --entrypoint python qar-decoder:dev -m qar_decode.selftest
 ```

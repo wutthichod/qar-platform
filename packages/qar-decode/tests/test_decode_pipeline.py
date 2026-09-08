@@ -9,9 +9,11 @@ import pytest
 from conftest import synth_recording
 from qar_decode import frames as frames_mod
 from qar_decode import parameters as params_mod
+from qar_decode.arinc717 import SYNC_WORDS
 from qar_decode.container import unwrap
 from qar_decode.decode import decode_bytes
 from qar_decode.fap import load_fap
+from qar_decode.selftest import run as run_selftest
 
 
 @pytest.fixture
@@ -49,7 +51,7 @@ def test_superframe_counter_cycles(built) -> None:
 def test_regular_parameter_round_trip(built) -> None:
     fs, fap, truth = built
     s = params_mod.decode(fs, fap["ALT"])
-    assert s.rate == 4
+    assert s.samples_per_frame == 4
     np.testing.assert_allclose(s.values, truth["ALT"])
 
 
@@ -59,14 +61,14 @@ def test_multi_sample_parameter_interleaves_in_time_order(built) -> None:
     time it was recorded."""
     fs, fap, truth = built
     s = params_mod.decode(fs, fap["VRT"])
-    assert s.rate == 8
+    assert s.samples_per_frame == 8
     np.testing.assert_allclose(s.values, truth["VRT"], rtol=1e-9)
 
 
 def test_parameter_split_across_subframes(built) -> None:
     fs, fap, truth = built
     s = params_mod.decode(fs, fap["SPLIT"])
-    assert s.rate == 1
+    assert s.samples_per_frame == 1
     np.testing.assert_allclose(s.values, truth["SPLIT"])
 
 
@@ -88,7 +90,7 @@ def test_unsigned_parameters_are_left_alone(built) -> None:
 def test_superframe_parameter_is_held_across_the_cycle(built) -> None:
     fs, fap, truth = built
     s = params_mod.decode(fs, fap["SUPER"])
-    assert s.rate == 1
+    assert s.samples_per_frame == 1
     # Frames where the counter reads 5 carry the value recorded there.
     at_five = np.flatnonzero(fs.sfc == 5)
     np.testing.assert_allclose(
@@ -131,8 +133,11 @@ def test_pipeline_reports_what_it_did(fap_dir) -> None:
     assert r.n_frames == 64
     assert r.frame_integrity == 1.0
     assert not r.failed
-    assert decoded.by_rate() == {1: ["SPLIT", "SUPER"], 4: ["ALT", "GEAR", "PITCH"],
-                                 8: ["VRT"]}
+    # Keyed in hertz: a frame is four seconds, so one sample per frame is
+    # 0.25 Hz and eight per frame is 2 Hz.
+    assert decoded.by_rate() == {
+        0.25: ["SPLIT", "SUPER"], 1.0: ["ALT", "GEAR", "PITCH"], 2.0: ["VRT"],
+    }
     assert "frame integrity" in r.summary()
 
 
@@ -158,3 +163,48 @@ def test_discontinuous_parameter_is_flagged(fap_dir) -> None:
     flagged = {f.mnemonic for f in decoded.report.suspect}
     assert "PITCH" in flagged
     assert "ALT" not in flagged
+
+
+def test_sync_words_are_the_standard_patterns() -> None:
+    assert SYNC_WORDS == (0x247, 0x5B8, 0xA47, 0xDB8)
+
+
+def test_selftest_passes() -> None:
+    """The container's HEALTHCHECK. It exercises the live pipeline, so a
+    regression that breaks decoding also fails the health check rather than
+    letting a broken image report itself healthy."""
+    assert run_selftest(verbose=False) == 0
+
+
+def test_confidence_counts_the_final_subframe(fap_dir) -> None:
+    """The last subframe must be inside the confidence figure.
+
+    An exclusive upper bound on the stride positions drops it, and a
+    recording whose final subframe is corrupt then reports a clean
+    1.000000 -- the one number an operator uses to decide whether to trust
+    a decode.
+    """
+    data, _ = synth_recording(n_frames=10)
+    words = (np.frombuffer(data, dtype="<u2") & 0x0FFF).copy()
+    layout = load_fap(fap_dir).frame
+
+    clean = frames_mod.build(words, layout)
+    assert clean.sync.confidence == 1.0
+
+    words[-64] = 0x000                       # kill the very last sync word
+    dirty = frames_mod.build(words, layout)
+    assert dirty.sync.confidence < 1.0
+    assert dirty.valid.sum() == clean.valid.sum() - 1
+
+
+def test_a_single_frame_recording_locks(fap_dir) -> None:
+    """Four subframes is a whole frame and enough to confirm the cycle.
+
+    Goes straight to the frame builder: container sniffing needs a few
+    kilobytes to recognise a word layout, and one frame is 512 bytes.
+    """
+    data, _ = synth_recording(n_frames=1)
+    words = np.frombuffer(data, dtype="<u2") & 0x0FFF
+    fs = frames_mod.build(words, load_fap(fap_dir).frame)
+    assert fs.n_frames == 1
+    assert fs.sync.confidence == 1.0

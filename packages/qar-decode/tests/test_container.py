@@ -11,7 +11,7 @@ import zipfile
 import numpy as np
 import pytest
 
-from qar_decode.container import UnsupportedContainer, crate, detect, pmf, unwrap, wgl
+from qar_decode.container import UnsupportedContainer, crate, detect, unwrap, wgl
 from conftest import synth_recording
 
 
@@ -147,3 +147,38 @@ def test_detect_reads_bytes_not_filenames() -> None:
     assert detect(_make_crate()) == "crate"
     with pytest.raises(UnsupportedContainer):
         detect(b"not a recording")
+
+
+def test_recording_enforces_the_12_bit_invariant() -> None:
+    """Every unwrapper masks, but the guarantee belongs to the type.
+
+    An unmasked stream does not fail loudly -- 0xF247 never equals the
+    0x247 sync pattern, so sync simply never locks and a perfectly good
+    recording is reported unreadable.
+    """
+    from qar_decode.container.base import Recording
+
+    rec = Recording(
+        words=np.array([0xF247, 0xF5B8, 0x0A47], dtype=np.uint16),
+        container="hand-made",
+        word_order="little",
+    )
+    assert rec.words.tolist() == [0x247, 0x5B8, 0xA47]
+
+
+def test_recording_accepts_a_read_only_buffer() -> None:
+    """np.frombuffer hands back a read-only view; masking must not try to
+    write through it."""
+    from qar_decode.container.base import Recording
+
+    view = np.frombuffer(np.array([0xF247], dtype="<u2").tobytes(), dtype="<u2")
+    assert not view.flags.writeable
+    rec = Recording(words=view, container="hand-made", word_order="little")
+    assert rec.words[0] == 0x247
+
+
+def test_real_unwrappers_already_satisfy_it() -> None:
+    payload, _ = synth_recording(n_frames=8, pad_nibble=0xF)
+    assert wgl.unwrap(payload).words.max() <= 0x0FFF
+    payload, _ = synth_recording(n_frames=8, big_endian=True)
+    assert unwrap(_make_pmf(payload)).words.max() <= 0x0FFF

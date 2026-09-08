@@ -60,9 +60,9 @@ def main(argv: list[str] | None = None) -> int:
 
     print(decoded.report.summary())
     print()
-    for rate, names in decoded.by_rate().items():
-        print(f"  {rate:>3} Hz  {len(names):>4} parameter(s)  "
-              f"{rate * decoded.report.n_frames:>9} rows")
+    for rate_hz, names in decoded.by_rate().items():
+        rows = int(round(rate_hz * decoded.report.duration_s))
+        print(f"  {rate_hz:>6g} Hz  {len(names):>4} parameter(s)  {rows:>9} rows")
 
     if args.out:
         import pyarrow.parquet as pq
@@ -70,8 +70,10 @@ def main(argv: list[str] | None = None) -> int:
         from qar_decode.arrow import tables
 
         args.out.mkdir(parents=True, exist_ok=True)
-        for rate, table in tables(decoded, fap).items():
-            path = args.out / f"rate_{rate:02d}hz.parquet"
+        from qar_decode.arrow import rate_label
+
+        for rate_hz, table in tables(decoded, fap).items():
+            path = args.out / f"rate_{rate_label(rate_hz)}hz.parquet"
             pq.write_table(table, path, compression="zstd")
             print(f"  wrote {path}  ({table.num_rows} x {table.num_columns})")
 
@@ -127,7 +129,7 @@ def _report_json(decoded) -> str:
             "frames": r.n_frames,
             "duration_s": r.duration_s,
             "frame_integrity": r.frame_integrity,
-            "rates": {str(k): v for k, v in decoded.by_rate().items()},
+            "rates_hz": {f"{k:g}": v for k, v in decoded.by_rate().items()},
             "decoded": r.decoded,
             "failed": r.failed,
             "out_of_range": [
@@ -144,7 +146,7 @@ def _report_json(decoded) -> str:
                 {
                     "mnemonic": f.mnemonic,
                     "unit": f.unit,
-                    "rate": f.rate,
+                    "rate_hz": f.rate_hz,
                     "jump_fraction": f.jump_fraction,
                     "declared_span": f.declared_span,
                 }
