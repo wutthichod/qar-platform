@@ -9,7 +9,7 @@ import pytest
 from conftest import synth_recording
 from qar_decode import frames as frames_mod
 from qar_decode import parameters as params_mod
-from qar_decode.arinc717 import SYNC_WORDS
+from qar_decode.arinc717 import SYNC_WORDS, find_sync
 from qar_decode.container import unwrap
 from qar_decode.decode import decode_bytes
 from qar_decode.fap import load_fap
@@ -208,3 +208,13 @@ def test_a_single_frame_recording_locks(fap_dir) -> None:
     fs = frames_mod.build(words, load_fap(fap_dir).frame)
     assert fs.n_frames == 1
     assert fs.sync.confidence == 1.0
+
+
+def test_a_recording_shorter_than_one_frame_does_not_lock() -> None:
+    """Three subframes cannot show the four-pattern cycle, so there is
+    nothing to confirm a size against and a stray sync must not be read as
+    a lock. Pinned because the explicit length guard that used to say this
+    was removed as redundant -- the position count enforces it."""
+    data, _ = synth_recording(n_frames=1)
+    words = (np.frombuffer(data, dtype="<u2") & 0x0FFF)[: 64 * 3]
+    assert find_sync(words, candidate_sizes=(64, 128, 256)) is None

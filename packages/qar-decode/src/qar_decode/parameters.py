@@ -31,6 +31,8 @@ class Series:
     signed: bool
     bits: int
     labels: dict[int, str] | None = None
+    encoding: str = "binary"            # "binary", "bcd" or "text"
+    text: np.ndarray | None = None      # str per sample, None where invalid
 
     @property
     def rate_hz(self) -> float:
@@ -84,6 +86,65 @@ def _apply(conversions: tuple[Conversion, ...], raw: np.ndarray) -> np.ndarray:
         if inside.any():
             out[inside] = evaluate(conv, values[inside])
     return out
+
+
+def _split(raw: np.ndarray, bits: int, widths: tuple[int, ...]) -> list[np.ndarray]:
+    """Cut an assembled field into sub-fields, most significant first."""
+    groups, shift = [], bits
+    for width in widths:
+        shift -= width
+        groups.append((raw >> shift) & ((1 << width) - 1))
+    return groups
+
+
+def _decode_digits(
+    param: AcquiredParameter, raw: np.ndarray, valid: np.ndarray, bits: int
+) -> Series:
+    """A field the FAP declares as BCD digits or packed characters.
+
+    PRA_CONV_CONF gives each sub-field's width. Read instead as one binary
+    number, these come out plausible and wrong: a BCD year of 22 is 0x22,
+    which is 34, and every timestamp built from it is twelve years out.
+    """
+    groups = _split(raw, bits, param.field_widths)
+    text = None
+
+    if param.encoding == "bcd":
+        number = np.zeros(raw.shape, dtype=np.int64)
+        for digit in groups:
+            # A nibble above 9 is not a decimal digit. It is corruption or
+            # no-computed-data, and it makes the whole sample meaningless.
+            valid = valid & (digit <= 9)
+            number = number * 10 + digit
+        # The FAP's conversion runs on the decimal value, not the raw bits:
+        # a DME frequency is BCD 130, then 100 + 0.1 x 130 = 113.0 MHz.
+        values = _apply(param.conversions, number) * param.slope + param.offset
+        values = np.where(valid, values, np.nan)
+    else:
+        codes = np.stack(groups, axis=1)
+        # NUL is padding. Anything else outside printable ASCII is not text,
+        # and a field that is all padding carries nothing.
+        printable = ((codes >= 32) & (codes < 127)) | (codes == 0)
+        valid = valid & printable.all(axis=1) & (codes != 0).any(axis=1)
+        chars = np.where(valid[:, None], codes, 0).astype(np.uint8)
+        strings = np.frombuffer(chars.tobytes(), dtype=f"S{chars.shape[1]}")
+        strings = np.char.replace(strings.astype(str), "\x00", "")
+        text = np.where(valid, strings.astype(object), None)
+        values = np.full(raw.shape, np.nan)
+
+    return Series(
+        mnemonic=param.mnemonic,
+        values=values,
+        valid=valid,
+        samples_per_frame=len(param.samples),
+        unit=param.unit,
+        raw=raw,
+        signed=False,
+        bits=bits,
+        labels=param.discretes or None,
+        encoding=param.encoding,
+        text=text,
+    )
 
 
 def _twos(raw: np.ndarray, bits: int) -> np.ndarray:
@@ -154,6 +215,9 @@ def decode(fs, param: AcquiredParameter) -> Series:
 
     raw_all = np.stack(columns, axis=1).ravel()
     valid = np.stack(masks, axis=1).ravel()
+
+    if param.encoding != "binary":
+        return _decode_digits(param, raw_all, valid, bits)
 
     signed = _resolve_signed(param, raw_all, bits)
     counts = _twos(raw_all, bits) if signed else raw_all

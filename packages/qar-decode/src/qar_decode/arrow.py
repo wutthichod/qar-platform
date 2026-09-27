@@ -72,6 +72,7 @@ def tables(decoded: Decoded, fap=None) -> dict[float, pa.Table]:
                 "samples_per_frame": str(s.samples_per_frame),
                 "bits": str(s.bits),
                 "signed": str(s.signed).lower(),
+                "encoding": s.encoding,
                 "fap": meta.fap,
                 "decoder_version": meta.decoder_version,
             }
@@ -85,12 +86,19 @@ def tables(decoded: Decoded, fap=None) -> dict[float, pa.Table]:
                 column_meta["locations"] = where
                 if param.superframe:
                     column_meta["superframe"] = "true"
+                if param.field_widths:
+                    column_meta["digit_widths"] = "".join(map(str, param.field_widths))
             if s.labels:
                 column_meta["labels"] = "; ".join(
                     f"{k}={v}" for k, v in sorted(s.labels.items())
                 )
-            fields.append(_field(name, s, column_meta))
-            columns.append(pa.array(s.values))
+            if s.text is not None:
+                fields.append(pa.field(name, pa.string(), nullable=True,
+                                       metadata=column_meta))
+                columns.append(pa.array(s.text, type=pa.string()))
+            else:
+                fields.append(_field(name, s, column_meta))
+                columns.append(pa.array(s.values))
 
         schema = pa.schema(fields, metadata=_table_metadata(decoded))
         out[rate_hz] = pa.Table.from_arrays(columns, schema=schema)
@@ -115,7 +123,8 @@ def _table_metadata(decoded: Decoded) -> dict[str, str]:
         "decoded_at": r.started_at or "",
     }
     for key in ("tail_number", "flight_number", "origin", "destination",
-                "recorded_at", "start_time"):
+                "recorded_at", "start_time", "start_time_source",
+                "clock_agreement", "clock_max_drift_s", "clock_rate"):
         value = r.container_metadata.get(key)
         if value:
             meta[key] = str(value)
@@ -135,6 +144,8 @@ def report_table(decoded: Decoded) -> pa.Table:
             "flight_number": [r.container_metadata.get("flight_number")],
             "origin": [r.container_metadata.get("origin")],
             "destination": [r.container_metadata.get("destination")],
+            "start_time": [r.container_metadata.get("start_time")],
+            "start_time_source": [r.container_metadata.get("start_time_source")],
             "subframe_words": [r.subframe_words],
             "sync_offset": [r.sync_offset],
             "sync_confidence": [r.sync_confidence],

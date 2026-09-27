@@ -152,7 +152,13 @@ def inspect_file(path: str | Path) -> FileInfo:
         except Exception:                                     # noqa: BLE001
             values = np.array([])
         numeric = values.dtype.kind in "fiu"
-        good = values[np.isfinite(values)] if numeric else values
+        if numeric:
+            good = values[np.isfinite(values)]
+        elif values.dtype == object:
+            # Text columns: a null string is a missing sample, not a value.
+            good = values[np.fromiter((v is not None for v in values), bool, values.size)]
+        else:
+            good = values
 
         info.columns.append(ColumnInfo(
             name=field_.name,

@@ -29,22 +29,20 @@ from qar_decode.frames import FRAME_SECONDS
 from qar_decode.parameters import Series
 
 __all__ = [
-    "Decoded", "DecodeReport", "RangeFinding", "SuspectFinding",
+    "Decoded", "DecodeReport", "RangeFinding", "StartTime", "SuspectFinding",
     "decode_bytes", "decode_file",
 ]
 
-# Bump on any change that alters decoded output, not only on releases: a
-# stamped version is the only way to scope a re-decode, and two files
-# claiming 1.0.0 that disagree cannot be told apart after the fact.
-#   1.1.0  all-ones no-computed-data no longer applied to signed fields,
-#          enumerated states, or fields narrower than 8 bits
-# 2.0.0: a frame is four seconds, not one. Every duration, sample rate and
-# timestamp before this version is wrong by a factor of four, so anything
-# stamped 1.x must be re-decoded rather than compared against 2.x output.
-DECODER_VERSION = "2.0.0"
+DECODER_VERSION = "2.1.0"
 
-# Mnemonics that carry recorded UTC, in the order the fields combine.
-_UTC = ("YEAR", "MONTH", "DAY", "UTC_HOUR", "UTC_MIN", "UTC_SEC")
+# Mnemonics carrying recorded UTC, as (year, month, day, hour, minute,
+# second). Every FAP family names these differently, so each is tried in
+# turn. Recorded UTC is worth this trouble: it is the only timestamp that
+# says when the aircraft actually flew.
+_UTC_SCHEMES: tuple[tuple[str, ...], ...] = (
+    ("YEAR", "MONTH", "DAY", "UTC_HOUR", "UTC_MIN", "UTC_SEC"),      # Airbus AGS
+    ("aYEAR", "aMONTH", "aDAY", "aGMTH", "aGMTM", "aGMTS"),          # Boeing AGS
+)
 
 
 @dataclass
@@ -121,7 +119,8 @@ class DecodeReport:
             f"frame integrity   {self.frame_integrity * 100:.4f}%",
             f"parameters        {len(self.decoded)} decoded, {len(self.failed)} failed",
         ]
-        for key in ("tail_number", "flight_number", "origin", "destination", "recorded_at"):
+        for key in ("tail_number", "flight_number", "origin", "destination",
+                    "recorded_at", "start_time", "start_time_source", "clock_agreement"):
             if self.container_metadata.get(key):
                 lines.append(f"{key:<18}{self.container_metadata[key]}")
         if self.out_of_range:
@@ -151,6 +150,7 @@ class Decoded:
     series: dict[str, Series]
     frames: frames_mod.FrameSet
     start_time: datetime | None = None
+    clock_rate: float = 1.0
 
     def by_rate(self) -> dict[float, list[str]]:
         """Group parameters by native rate in hertz.
@@ -176,37 +176,176 @@ class Decoded:
         return np.arange(n, dtype=np.float64) / rate_hz
 
 
-def _resolve_start_time(series: dict[str, Series], meta: dict[str, Any]) -> datetime | None:
-    """Recorded UTC if the FAP carried it, otherwise the container's claim.
+# A recorded clock may read up to this far from the frame count and still
+# agree: one second covers a clock that ticks just after a subframe boundary,
+# and the odd mid-flight correction.
+_CLOCK_TOLERANCE_S = 1
+# Below this share of agreeing seconds the recorded clock is not believed.
+_CLOCK_MIN_AGREEMENT = 0.9
+# A recorded clock running further than this from the frame count (7 s an
+# hour) is not a drifting clock but a mis-decoded one.
+_CLOCK_MAX_RATE_ERROR = 2e-3
 
-    Recorded time is preferred: the container timestamp is when the file was
-    offloaded, which on a long-haul rotation can be days after the flight.
+
+@dataclass
+class StartTime:
+    """Where row zero sits on the wall clock, and how that was decided.
+
+    ``source`` is the point. A start time from the aircraft's clock and one
+    from the container's offload stamp look identical in a timestamp column,
+    and they can be days apart.
     """
-    have = {k: series[k] for k in _UTC if k in series and series[k].valid.any()}
-    if len(have) == len(_UTC):
-        try:
-            first = {}
-            for key, s in have.items():
-                good = s.values[s.valid]
-                first[key] = int(round(float(good[0])))
-            year = first["YEAR"]
-            year += 2000 if year < 100 else 0
-            return datetime(
-                year, first["MONTH"], first["DAY"],
-                first["UTC_HOUR"], first["UTC_MIN"], first["UTC_SEC"],
-                tzinfo=timezone.utc,
-            )
-        except (ValueError, KeyError, IndexError):
-            pass
 
-    stamp = meta.get("recorded_at") or meta.get("shipped_at")
-    if stamp:
+    value: datetime | None
+    source: str                      # "recorded_utc", "container:<key>" or "none"
+    agreement: float | None = None   # share of seconds consistent with value
+    max_drift_s: int | None = None
+    seconds_checked: int = 0
+    clock_rate: float = 1.0          # recorded seconds per frame-count second
+    notes: list[str] = field(default_factory=list)
+
+
+def _per_second(s: Series, n_seconds: int) -> tuple[np.ndarray, np.ndarray]:
+    """A series' latest sample at or before each whole second."""
+    index = np.floor(np.arange(n_seconds) * s.rate_hz).astype(np.int64)
+    index = np.clip(index, 0, s.values.size - 1)
+    return s.values[index], s.valid[index]
+
+
+def _recorded_readings(series: dict[str, Series], scheme: tuple[str, ...],
+                       n_seconds: int) -> tuple[np.ndarray, np.ndarray]:
+    """Every second holding a valid recorded date and time, as (second of
+    recording, recorded time in epoch seconds).
+
+    The fields are recorded at different rates -- the date often once per
+    frame, the time every second -- so each is carried to a per-second grid
+    first. A second whose reading is impossible (a 37th of the month, a
+    minute of 61) is dropped on its own rather than failing the clock.
+    """
+    fields = []
+    ok = np.ones(n_seconds, dtype=bool)
+    for key in scheme:
+        values, valid = _per_second(series[key], n_seconds)
+        fields.append(np.where(valid, np.nan_to_num(values), 0).astype(np.int64))
+        ok &= valid
+    year, month, day, hour, minute, second = fields
+    # Recorders write the year as two digits about as often as four.
+    year = np.where(year < 100, year + 2000, year)
+    ok &= (year >= 1970) & (month >= 1) & (month <= 12) & (day >= 1) & (day <= 31)
+    ok &= (hour < 24) & (minute < 60) & (second < 60)
+
+    months = ((year - 1970) * 12 + (month - 1)).astype("datetime64[M]")
+    days = months.astype("datetime64[D]") + (day - 1).astype("timedelta64[D]")
+    ok &= days.astype("datetime64[M]") == months        # rejects 30 February
+    epoch = (days.astype("datetime64[s]").astype(np.int64)
+             + hour * 3600 + minute * 60 + second)
+    return np.arange(n_seconds)[ok], epoch[ok]
+
+
+def _fit_clock(t: np.ndarray, epoch: np.ndarray) -> tuple[float, float, np.ndarray]:
+    """The recorded clock as a line against the frame count:
+    ``epoch = start + rate * t``. Returns (start, rate, residuals).
+
+    A line, not a constant offset. The recorder's frame clock and the
+    aircraft's UTC run at very slightly different rates -- about a second an
+    hour on both B777 samples -- so over a twelve-hour sector a constant
+    offset fits neither end, and a healthy clock looks broken.
+
+    Theil-Sen gives the first estimate, so a corrupt stretch of readings
+    cannot drag it; least squares then refines it on the readings that
+    agree.
+    """
+    base = int(epoch.min())
+    x = t.astype(np.float64)
+    y = (epoch - base).astype(np.float64)
+
+    pick = np.unique(np.linspace(0, x.size - 1, min(x.size, 256)).astype(np.int64))
+    i, j = np.triu_indices(pick.size, k=1)
+    dx = x[pick][j] - x[pick][i]
+    slopes = (y[pick][j] - y[pick][i])[dx > 0] / dx[dx > 0]
+    rate = float(np.median(slopes)) if slopes.size else 1.0
+    start = float(np.median(y - rate * x))
+    residual = y - (start + rate * x)
+
+    inliers = np.abs(residual) <= _CLOCK_TOLERANCE_S
+    if inliers.sum() >= 2 and np.ptp(x[inliers]) > 0:
+        rate, start = (float(v) for v in np.polyfit(x[inliers], y[inliers], 1))
+        residual = y - (start + rate * x)
+    return base + start, rate, residual
+
+
+def _resolve_start_time(series: dict[str, Series], meta: dict[str, Any],
+                        duration_s: float) -> StartTime:
+    """Recorded UTC if it is present and consistent; otherwise the
+    container's timestamp, labelled as such.
+
+    The start comes from a fit through every recorded second, not from the
+    first sample. Trusting one sample means a single corrupt reading shifts
+    every timestamp in the file, and the recorded clock that would catch it
+    sits unread in the same table.
+    """
+    n_seconds = int(round(duration_s))
+    notes: list[str] = []
+
+    for scheme in _UTC_SCHEMES:
+        if not all(k in series and series[k].valid.any() for k in scheme):
+            continue
+        t, epoch = _recorded_readings(series, scheme, n_seconds)
+        if t.size == 0:
+            notes.append(f"recorded UTC ({', '.join(scheme)}) decoded, but no "
+                         "second holds a valid date and time")
+            continue
+        start, rate, residual = _fit_clock(t, epoch)
+        # A date recorded more slowly than the time of day rolls over a
+        # moment after midnight: 00:00:00 can still carry yesterday's date
+        # and read exactly a day early. That is the field's sampling, not a
+        # clock fault, so fold it back rather than report a day of drift.
+        lag = np.abs(np.abs(residual) - 86400) <= _CLOCK_TOLERANCE_S
+        residual = np.where(lag, residual - np.sign(residual) * 86400, residual)
+        drift = np.abs(residual)
+        agreement = float((drift <= _CLOCK_TOLERANCE_S).mean())
+        if agreement < _CLOCK_MIN_AGREEMENT:
+            notes.append(f"recorded UTC ({', '.join(scheme)}) ignored: only "
+                         f"{agreement:.1%} of seconds agree with a steady clock")
+            continue
+        if abs(rate - 1.0) > _CLOCK_MAX_RATE_ERROR:
+            notes.append(f"recorded UTC ({', '.join(scheme)}) ignored: it runs at "
+                         f"{rate:.5f}x the frame count, which no clock does")
+            continue
+        gain = (rate - 1.0) * n_seconds
+        if abs(gain) > _CLOCK_TOLERANCE_S:
+            notes.append(f"recorded clock runs {(rate - 1.0) * 3600:+.2f}s/h against "
+                         f"the frame count ({gain:+.1f}s over the recording); "
+                         "timestamps follow the recorded clock")
+        if drift.max() > _CLOCK_TOLERANCE_S:
+            notes.append(f"recorded clock strays up to {drift.max():.0f}s from a "
+                         f"steady rate on {1 - agreement:.2%} of seconds")
+        return StartTime(
+            value=datetime.fromtimestamp(round(start), tz=timezone.utc),
+            source="recorded_utc",
+            agreement=agreement,
+            max_drift_s=int(round(drift.max())),
+            seconds_checked=int(t.size),
+            clock_rate=rate,
+            notes=notes,
+        )
+
+    for key in ("recorded_at", "shipped_at"):
+        stamp = meta.get(key)
+        if not stamp:
+            continue
         try:
-            return datetime.fromisoformat(stamp.replace("Z", "+00:00"))
+            value = datetime.fromisoformat(stamp.replace("Z", "+00:00"))
         except ValueError:
-            return None
-    return None
+            continue
+        if value.tzinfo is None:
+            value = value.replace(tzinfo=timezone.utc)
+        notes.append(f"start_time is the container's {key} ({stamp}), not the "
+                     "aircraft clock; it can be days after the flight")
+        return StartTime(value=value, source=f"container:{key}", notes=notes)
 
+    notes.append("no start time: no usable recorded UTC and no container timestamp")
+    return StartTime(value=None, source="none", notes=notes)
 
 def _range_check(name: str, s: Series, param) -> RangeFinding | None:
     if param.min_op is None or param.max_op is None or param.is_discrete:
@@ -323,10 +462,17 @@ def decode_bytes(
         elapsed_s=round(time.time() - started, 3),
     )
 
-    start = _resolve_start_time(series, recording.metadata)
-    if start is not None:
-        report.container_metadata.setdefault("start_time", start.isoformat())
-    return Decoded(report=report, series=series, frames=fs, start_time=start)
+    start = _resolve_start_time(series, recording.metadata, fs.duration_s)
+    report.notes.extend(start.notes)
+    report.container_metadata["start_time_source"] = start.source
+    if start.value is not None:
+        report.container_metadata["start_time"] = start.value.isoformat()
+    if start.agreement is not None:
+        report.container_metadata["clock_agreement"] = f"{start.agreement:.6f}"
+        report.container_metadata["clock_max_drift_s"] = str(start.max_drift_s)
+        report.container_metadata["clock_rate"] = f"{start.clock_rate:.8f}"
+    return Decoded(report=report, series=series, frames=fs,
+                   start_time=start.value, clock_rate=start.clock_rate)
 
 
 def decode_file(
@@ -345,5 +491,7 @@ def timestamps(decoded: Decoded, rate_hz: float) -> np.ndarray | None:
     if decoded.start_time is None:
         return None
     base = np.datetime64(decoded.start_time.replace(tzinfo=None), "ns")
-    offsets = (decoded.timebase(rate_hz) * 1e9).astype("timedelta64[ns]")
+    # Scaled by the fitted clock rate, so the last row of a long sector sits
+    # where the aircraft's clock says it does, not where the frame count does.
+    offsets = (decoded.timebase(rate_hz) * decoded.clock_rate * 1e9).astype("timedelta64[ns]")
     return base + offsets

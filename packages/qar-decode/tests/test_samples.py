@@ -220,3 +220,68 @@ def test_b787_crate_verifies_and_demuxes() -> None:
     assert stream.census[4] == 5 * stream.census[3]
     assert stream.census[5] == 10 * stream.census[3]
     assert stream.resyncs == 0
+
+
+def _text_mode(series) -> str:
+    import collections
+    return collections.Counter(t for t in series.text if t is not None).most_common(1)[0][0]
+
+
+def test_a350_start_time_names_its_source(a350) -> None:
+    meta = a350.report.container_metadata
+    assert meta["start_time_source"] == "recorded_utc"
+    assert float(meta["clock_agreement"]) == 1.0
+
+
+def test_b777_bcd_fields_give_the_real_date_serial_and_route() -> None:
+    """The B777 writes its date as BCD. Read as binary, HS-TTA flew in 2034
+    on the 37th of September and had no timestamp column at all."""
+    if not B777.exists():
+        pytest.skip("B777 sample absent")
+    import numpy as np
+
+    wanted = {"aYEAR", "aMONTH", "aDAY", "aGMTH", "aGMTM", "aGMTS", "ESNR",
+              *(f"aORG{i}" for i in range(1, 5)), *(f"aDESC{i}" for i in range(1, 5))}
+    decoded = decode_file(B777, load_fap(FAPS / "CS77724", only=wanted))
+
+    assert decoded.start_time is not None
+    # The recording starts on the 24th UTC and crosses midnight; its filename
+    # stamp, 2022-09-25 06:58:42, is within half a minute of its end.
+    assert decoded.start_time.strftime("%Y-%m-%d %H:%M") == "2022-09-24 18:41"
+    assert decoded.report.container_metadata["start_time_source"] == "recorded_utc"
+
+    esn = decoded.series["ESNR"]
+    values, counts = np.unique(esn.values[esn.valid], return_counts=True)
+    assert int(values[counts.argmax()]) == 901563          # not 9442659
+
+    origin = "".join(_text_mode(decoded.series[f"aORG{i}"]) for i in range(1, 5))
+    destination = "".join(_text_mode(decoded.series[f"aDESC{i}"]) for i in range(1, 5))
+    assert (origin, destination) == ("VTBS", "EGLL")
+
+
+def test_b777_hs_tkn_date_matches_its_filename() -> None:
+    other = SAMPLES / "B777" / "HS-TKN_20220513124029.wgl" / "raw.dat"
+    if not other.exists():
+        pytest.skip("B777 HS-TKN sample absent")
+    fap = load_fap(FAPS / "CS77724",
+                   only={"aYEAR", "aMONTH", "aDAY", "aGMTH", "aGMTM", "aGMTS"})
+    decoded = decode_file(other, fap)
+    assert decoded.start_time.date().isoformat() == "2022-05-13"      # not 2034-05-19
+
+
+def test_b777_timestamps_follow_the_recorded_clock_to_the_end() -> None:
+    """The HS-TTA clock gains on the frame count over twelve hours. The last
+    timestamp must match what the aircraft recorded then, not the start plus
+    a frame count."""
+    if not B777.exists():
+        pytest.skip("B777 sample absent")
+    from qar_decode.decode import timestamps
+
+    fap = load_fap(FAPS / "CS77724",
+                   only={"aYEAR", "aMONTH", "aDAY", "aGMTH", "aGMTM", "aGMTS"})
+    decoded = decode_file(B777, fap)
+    last = timestamps(decoded, 1.0)[-1].astype("datetime64[s]").item()
+    h, m, s = (decoded.series[k].values[-1] for k in ("aGMTH", "aGMTM", "aGMTS"))
+    recorded = int(h) * 3600 + int(m) * 60 + int(s)
+    computed = last.hour * 3600 + last.minute * 60 + last.second
+    assert abs(recorded - computed) <= 1

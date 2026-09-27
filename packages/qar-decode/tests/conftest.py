@@ -36,7 +36,7 @@ def _lcp(word, length, src_lsb=1, tgt_lsb=0, subframe="ALL", sample=1,
 
 
 def _acquired(mnemonic, locations, *, unit="", rate=4, coeff=None,
-              min_op=None, max_op=None, superframe=0, signed=0, txd=()):
+              min_op=None, max_op=None, superframe=0, signed=0, txd=(), conv=""):
     euc = ""
     if coeff is not None:
         mantissa, exponent = coeff
@@ -50,7 +50,7 @@ def _acquired(mnemonic, locations, *, unit="", rate=4, coeff=None,
     )
     return (
         '<?xml version="1.0" encoding="utf-16"?>\n'
-        f'<PRA EUT_ID="1" PRA_NB_FRAMES_PER_SCYCLE="16" PRA_OFFSET="0" '
+        f'<PRA EUT_ID="1" PRA_CONV_CONF="{conv}" PRA_NB_FRAMES_PER_SCYCLE="16" PRA_OFFSET="0" '
         f'PRA_SLOPE="1" PRA_SUPERFRAME="{superframe}" '
         f'PRM_MNEMONIC="{mnemonic}" PRM_NAME="{mnemonic}_LONG" '
         f'PRM_PARAMETER_SIGNED="{signed}" PRM_RATE="{rate}" '

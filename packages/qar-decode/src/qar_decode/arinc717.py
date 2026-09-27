@@ -53,7 +53,7 @@ def find_sync(
     sync_words: tuple[int, ...] = SYNC_WORDS,
     min_confidence: float = 0.5,
     max_candidates: int = 4096,
-    probe: int = 4000,
+    probe: int = 64,
 ) -> SyncResult | None:
     """Locate the recording's subframe size and phase.
 
@@ -74,59 +74,76 @@ def find_sync(
     subframes from the front rather than needing a phase to be tracked
     through everything downstream.
 
-    Confidence is judged on a probe of up to ``probe`` strides for speed,
-    then recomputed across the whole recording for the winner, so the
-    returned number describes the file rather than its first few seconds.
-    Real recordings drop subframes, so a perfect run is not required --
-    demanding one is a common cause of false 'unreadable file' verdicts.
+    Each candidate is rejected on a short ``probe`` of strides before
+    anything expensive happens, then the survivor is scored across the whole
+    recording, so the returned confidence describes the file rather than its
+    first few seconds. Real recordings drop subframes, so a perfect run is
+    not required -- demanding one is a common cause of false 'unreadable
+    file' verdicts.
     """
     best: SyncResult | None = None
+    total_words = words.size
 
-    for size in candidate_sizes:
-        # A size is only testable if the file holds a whole frame at it:
-        # all four sync patterns have to be seen to tell a lock from a
-        # coincidence. Cheap enough to run before the scan below, and it is
-        # the same condition `positions.size < 4` enforces per offset.
-        if words.size < size * SUBFRAMES_PER_FRAME:
-            continue
+    # Every position the first sync pattern occupies, anywhere in the file.
+    # Computed once: it does not depend on the subframe size, and scanning
+    # the whole recording rather than a window near the front is what makes
+    # this robust to a header of any length. Measured at 1 ms on a 22
+    # million word file -- cheap enough that bounding the search would be
+    # trading a real failure mode for nothing.
+    starts = np.flatnonzero(words == sync_words[0])
+    if starts.size == 0:
+        return None
+    starts = starts[:max_candidates]
 
-        # Search well past the start of the file, for the header reason above.
-        window = min(max(size * 64, 1 << 13), words.size)
-        starts = np.flatnonzero(words[:window] == sync_words[0])
-        if starts.size == 0:
-            continue
-
-        for offset in starts[:max_candidates]:
+    for subframe_words in candidate_sizes:
+        for offset in starts:
             offset = int(offset)
-            # Inclusive upper bound: a subframe starting at exactly
-            # words.size - size is whole and is one `frames.build` will
-            # construct. Excluding it drops the last subframe from the
-            # confidence figure -- so a recording whose final subframe is
-            # corrupt reports a clean 1.000000 -- and leaves a one-frame
-            # recording with three positions, below the minimum, unlockable.
-            positions = np.arange(offset, words.size - size + 1, size)
-            if positions.size < SUBFRAMES_PER_FRAME:
+
+            # How many whole subframes follow this offset. Computed rather
+            # than materialised: building the full stride array for every
+            # candidate is what makes a file that never locks expensive,
+            # and on a 22-million-word recording most candidates are noise.
+            n_positions = (
+                total_words - subframe_words - offset
+            ) // subframe_words + 1
+
+            # A candidate needs a whole frame to be judged on: all four
+            # sync patterns must be seen in sequence, or one stray 0x247 in
+            # a short file looks like a lock. This also covers a recording
+            # shorter than a single frame at this size.
+            if n_positions < SUBFRAMES_PER_FRAME:
                 continue
 
-            sample = positions[:probe]
+            # Cheap rejection first. A wrong phase matches at roughly one
+            # in 4096, so a couple of dozen strides separate signal from
+            # noise past any doubt, and nearly every candidate dies here for
+            # the cost of a few dozen comparisons rather than a few
+            # thousand.
+            n_probe = min(probe, n_positions)
+            probe_at = offset + subframe_words * np.arange(n_probe)
             expected = np.array(
-                [sync_words[i % len(sync_words)] for i in range(sample.size)],
+                [sync_words[i % len(sync_words)] for i in range(n_probe)],
                 dtype=np.uint16,
             )
-            if np.count_nonzero(words[sample] == expected) / sample.size < min_confidence:
+            if np.count_nonzero(words[probe_at] == expected) / n_probe < min_confidence:
                 continue
 
+            # Survivor: score it across the whole recording, so the returned
+            # confidence describes the file and not its first few seconds.
+            positions = offset + subframe_words * np.arange(n_positions)
             expected_full = np.array(
-                [sync_words[i % len(sync_words)] for i in range(positions.size)],
+                [sync_words[i % len(sync_words)] for i in range(n_positions)],
                 dtype=np.uint16,
             )
             confidence = (
-                np.count_nonzero(words[positions] == expected_full) / positions.size
+                np.count_nonzero(words[positions] == expected_full) / n_positions
             )
             if confidence < min_confidence:
                 continue
 
-            result = SyncResult(subframe_size=size, offset=offset, confidence=confidence)
+            result = SyncResult(
+                subframe_size=subframe_words, offset=offset, confidence=confidence
+            )
             if best is None or result.confidence > best.confidence:
                 best = result
             break

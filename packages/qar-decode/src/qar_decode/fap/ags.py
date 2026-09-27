@@ -244,6 +244,9 @@ class AcquiredParameter:
     max_op: float | None = None
     description: str | None = None
     source_file: str | None = None
+    # PRA_CONV_CONF as sub-field bit widths, most significant first. Empty
+    # for a plain binary number, which is almost every parameter.
+    digit_widths: tuple[int, ...] = ()
 
     @property
     def bits(self) -> int:
@@ -270,6 +273,50 @@ class AcquiredParameter:
     @property
     def is_discrete(self) -> bool:
         return bool(self.discretes)
+
+    @property
+    def field_widths(self) -> tuple[int, ...]:
+        """The digit widths laid over this parameter's actual bit length.
+
+        PRA_CONV_CONF usually sums to the field width exactly. When it does
+        not, it is a pattern: "7" on a 56-bit field is eight 7-bit
+        characters, and "7777" on a 7-bit field is one character of a
+        four-letter code the FAP splits across four parameters. A spec that
+        neither tiles the field nor fits it from one end is left undecoded
+        rather than guessed at.
+        """
+        widths, bits = self.digit_widths, self.bits
+        if not widths or bits == 0:
+            return ()
+        total = sum(widths)
+        if total == bits:
+            return widths
+        if bits % total == 0:
+            return widths * (bits // total)
+        for ordered, reverse in ((widths, False), (widths[::-1], True)):
+            taken, used = [], 0
+            for width in ordered:
+                if used + width > bits:
+                    break
+                taken.append(width)
+                used += width
+            if used == bits:
+                return tuple(reversed(taken)) if reverse else tuple(taken)
+        return ()
+
+    @property
+    def encoding(self) -> str:
+        """How the assembled bits are read: "binary", "bcd" or "text".
+
+        Four bits or fewer per sub-field is a decimal digit; seven or eight
+        is a character. Anything else is left as a binary number.
+        """
+        widths = self.field_widths
+        if widths and all(w <= 4 for w in widths):
+            return "bcd"
+        if widths and all(w in (7, 8) for w in widths):
+            return "text"
+        return "binary"
 
     @classmethod
     def from_file(cls, path: Path) -> AcquiredParameter | None:
@@ -336,6 +383,13 @@ class AcquiredParameter:
             if e.tag == "TXD"
         }
 
+        # A digit-width string such as "44" or "777". Real FAPs also carry
+        # "" and ".", both of which mean a plain binary number.
+        conv = (r.get("PRA_CONV_CONF") or "").strip()
+        digit_widths = tuple(int(c) for c in conv if c.isdigit())
+        if 0 in digit_widths:
+            digit_widths = ()
+
         mnemonic = r.get("PRM_MNEMONIC") or path.stem
         return cls(
             mnemonic=mnemonic,
@@ -353,6 +407,7 @@ class AcquiredParameter:
             max_op=_float(r, "PRM_MAX_OP_RANGE") if r.get("PRM_MAX_OP_RANGE") else None,
             description=r.get("PRM_DESCRIPTION") or None,
             source_file=path.name,
+            digit_widths=digit_widths,
         )
 
 
